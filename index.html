@@ -1,0 +1,2599 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>复兴大学 · 剑法学院</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{width:100%;height:100%;overflow:hidden;background:#0e0e0e;}
+  body{display:flex;align-items:center;justify-content:center;touch-action:none;}
+  canvas{display:block;touch-action:none;box-shadow:0 0 40px rgba(0,0,0,.8);}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+(() => {
+"use strict";
+
+const W = 540, H = 960;
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+const INK = '#1c1c1c';
+const PAPER = '#efe9dc';
+const INK2 = '#3a3630';
+const RED = '#8c2b2b';
+
+function mulberry32(a){
+  return function(){
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+const lerp = (a,b,t)=>a+(b-a)*t;
+const dist2 = (ax,ay,bx,by)=>Math.hypot(ax-bx,ay-by);
+
+function resize(){
+  const vw = window.innerWidth, vh = window.innerHeight;
+  const s = Math.min(vw/W, vh/H);
+  canvas.style.width = (W*s)+'px';
+  canvas.style.height = (H*s)+'px';
+  const dpr = Math.min(window.devicePixelRatio||1, 2.5);
+  canvas.width = W*dpr; canvas.height = H*dpr;
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+window.addEventListener('resize', resize);
+
+/* ---------- 纸张纹理 ---------- */
+let paperTex = null;
+function makePaper(){
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const g = c.getContext('2d');
+  g.fillStyle = PAPER;
+  g.fillRect(0,0,W,H);
+  for (let i=0;i<4200;i++){
+    const x = Math.random()*W, y = Math.random()*H;
+    const a = Math.random()*0.055;
+    g.fillStyle = `rgba(110,98,78,${a})`;
+    g.fillRect(x, y, Math.random()*3+1, Math.random()*2+0.6);
+  }
+  const grad = g.createRadialGradient(W/2, H/2, H*0.15, W/2, H/2, H*0.72);
+  grad.addColorStop(0, 'rgba(0,0,0,0)');
+  grad.addColorStop(1, 'rgba(86,74,54,0.20)');
+  g.fillStyle = grad;
+  g.fillRect(0,0,W,H);
+  const g2 = g.createLinearGradient(0,0,0,H);
+  g2.addColorStop(0,'rgba(255,255,255,0.18)');
+  g2.addColorStop(0.4,'rgba(255,255,255,0)');
+  g.fillStyle = g2;
+  g.fillRect(0,0,W,H);
+  return c;
+}
+
+/* ---------- 文字 ---------- */
+const FONT_CN = '"KaiTi","STKaiti","Kaiti SC","楷体",serif';
+function font(size, weight){ return `${weight||''} ${size}px ${FONT_CN}`.trim(); }
+function drawText(str, x, y, size, opts){
+  opts = opts || {};
+  ctx.save();
+  ctx.font = font(size, opts.weight);
+  ctx.textAlign = opts.align || 'left';
+  ctx.textBaseline = opts.baseline || 'middle';
+  ctx.fillStyle = opts.color || INK;
+  if (opts.alpha !== undefined) ctx.globalAlpha = opts.alpha;
+  if (opts.shadow){
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.fillText(str, x+0.6, y+0.6);
+    ctx.fillStyle = opts.color || INK;
+  }
+  ctx.fillText(str, x, y);
+  ctx.restore();
+}
+
+/* ---------- 手绘风矩形 ---------- */
+function sketchRect(x,y,w,h,lw,seed){
+  const rnd = mulberry32(seed||7);
+  lw = lw || 2;
+  ctx.save();
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = lw;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  const j = ()=> (rnd()-0.5)*2.2;
+  ctx.beginPath();
+  ctx.moveTo(x+j(), y+j());
+  ctx.lineTo(x+w*0.5+j(), y+j());
+  ctx.lineTo(x+w+j(), y+j());
+  ctx.lineTo(x+w+j(), y+h*0.5+j());
+  ctx.lineTo(x+w+j(), y+h+j());
+  ctx.lineTo(x+w*0.5+j(), y+h+j());
+  ctx.lineTo(x+j(), y+h+j());
+  ctx.lineTo(x+j(), y+h*0.5+j());
+  ctx.lineTo(x+j(), y+j());
+  ctx.stroke();
+  ctx.restore();
+}
+function roundRectPath(x,y,w,h,r){
+  r = Math.min(r, w/2, h/2);
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+}
+
+/* ---------- 墨点形状 ---------- */
+function inkBlobPath(cx,cy,r,seed){
+  const rnd = mulberry32(seed);
+  const n = 18;
+  ctx.beginPath();
+  for (let i=0;i<=n;i++){
+    const a = i/n*Math.PI*2;
+    const rr = r*(0.80 + rnd()*0.36);
+    const x = cx + Math.cos(a)*rr;
+    const y = cy + Math.sin(a)*rr;
+    if (i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.closePath();
+}
+
+/* ---------- RDP 折线简化 ---------- */
+function perpDist(p,a,b){
+  const dx = b.x-a.x, dy = b.y-a.y;
+  const L = Math.hypot(dx,dy);
+  if (L < 1e-6) return Math.hypot(p.x-a.x, p.y-a.y);
+  return Math.abs((p.x-a.x)*dy - (p.y-a.y)*dx)/L;
+}
+function rdp(pts, tol){
+  if (pts.length < 3) return pts.slice();
+  let maxD = -1, idx = 0;
+  const a = pts[0], b = pts[pts.length-1];
+  for (let i=1;i<pts.length-1;i++){
+    const d = perpDist(pts[i], a, b);
+    if (d > maxD){ maxD = d; idx = i; }
+  }
+  if (maxD > tol){
+    const l = rdp(pts.slice(0, idx+1), tol);
+    const r = rdp(pts.slice(idx), tol);
+    return l.slice(0,-1).concat(r);
+  }
+  return [a,b];
+}
+
+/* ============================================================
+   音频系统（程序化合成）
+   ============================================================ */
+let settings = { music:true, sfx:true };
+
+const AudioSys = {
+  ac: null,
+  master: null,
+  musicGain: null,
+  sfxGain: null,
+  bgmNext: 0,
+  bgmStep: 0,
+  intensity: 0,
+  init(){
+    if (this.ac) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    this.ac = new AC();
+    this.master = this.ac.createGain();
+    this.master.gain.value = 0.75;
+    this.master.connect(this.ac.destination);
+    this.musicGain = this.ac.createGain();
+    this.musicGain.gain.value = 0.14;
+    this.musicGain.connect(this.master);
+    this.sfxGain = this.ac.createGain();
+    this.sfxGain.gain.value = 0.42;
+    this.sfxGain.connect(this.master);
+    this.bgmNext = this.ac.currentTime + 0.15;
+  },
+  resume(){
+    this.init();
+    if (this.ac && this.ac.state === 'suspended') this.ac.resume();
+  },
+  update(scene){
+    if (!this.ac || !settings.music) return;
+    const intense = (scene === 'levels' || scene === 'battle');
+    this.intensity = intense ? 1 : 0;
+    const now = this.ac.currentTime;
+    if (this.bgmNext < now - 1) this.bgmNext = now + 0.05;
+    const interval = intense ? 0.26 : 0.5;
+    while (this.bgmNext < now + 0.25){
+      this.playBgmNote(this.bgmNext, intense);
+      this.bgmNext += interval;
+    }
+  },
+  playBgmNote(t, intense){
+    const calmScale = [220, 261.63, 293.66, 329.63, 392, 440, 523.25];
+    const intenseScale = [164.81, 196, 220, 246.94, 293.66, 329.63, 392];
+    const scale = intense ? intenseScale : calmScale;
+    const calmPattern = [0,2,4,3, 1,3,5,4, 2,4,6,5, 3,1,0,2];
+    const intensePattern = [0,3,2,4, 1,4,3,5, 2,5,4,6, 0,3,1,4];
+    const pattern = intense ? intensePattern : calmPattern;
+    const i = pattern[this.bgmStep % pattern.length];
+    this.bgmStep++;
+    const f = scale[i];
+    const o = this.ac.createOscillator();
+    const g = this.ac.createGain();
+    o.type = intense ? 'triangle' : 'sine';
+    o.frequency.value = f;
+    const vol = intense ? 0.30 : 0.32;
+    const dur = intense ? 0.22 : 0.46;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(vol, t+0.03);
+    g.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+    o.connect(g); g.connect(this.musicGain);
+    o.start(t); o.stop(t+dur+0.04);
+    if (intense && this.bgmStep % 4 === 1){
+      const bo = this.ac.createOscillator();
+      const bg = this.ac.createGain();
+      bo.type = 'sine';
+      bo.frequency.setValueAtTime(70, t);
+      bo.frequency.exponentialRampToValueAtTime(45, t+0.16);
+      bg.gain.setValueAtTime(0.35, t);
+      bg.gain.exponentialRampToValueAtTime(0.001, t+0.18);
+      bo.connect(bg); bg.connect(this.musicGain);
+      bo.start(t); bo.stop(t+0.2);
+    }
+  },
+  tone(freq, dur, type, vol, slideTo){
+    if (!this.ac || !settings.sfx) return;
+    const t = this.ac.currentTime;
+    const o = this.ac.createOscillator();
+    const g = this.ac.createGain();
+    o.type = type||'sine';
+    o.frequency.setValueAtTime(freq, t);
+    if (slideTo) o.frequency.exponentialRampToValueAtTime(slideTo, t+dur);
+    g.gain.setValueAtTime(vol||0.22, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t+dur);
+    o.connect(g); g.connect(this.sfxGain);
+    o.start(t); o.stop(t+dur+0.02);
+  },
+  noise(dur, vol, filterFreq){
+    if (!this.ac || !settings.sfx) return;
+    const t = this.ac.currentTime;
+    const len = Math.max(1, Math.floor(this.ac.sampleRate * dur));
+    const buf = this.ac.createBuffer(1, len, this.ac.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i=0;i<len;i++) data[i] = (Math.random()*2-1)*(1 - i/len);
+    const src = this.ac.createBufferSource();
+    src.buffer = buf;
+    const f = this.ac.createBiquadFilter();
+    f.type='lowpass'; f.frequency.value = filterFreq||2000;
+    const g = this.ac.createGain();
+    g.gain.value = vol||0.3;
+    src.connect(f); f.connect(g); g.connect(this.sfxGain);
+    src.start(t);
+  },
+  click(){ this.tone(660, 0.06, 'triangle', 0.16); },
+  slash(){ this.noise(0.15, 0.28, 3200); this.tone(880, 0.08, 'sawtooth', 0.07, 320); },
+  hit(){ this.tone(180, 0.12, 'square', 0.13, 90); },
+  dodge(){ this.tone(520, 0.18, 'sine', 0.16, 900); },
+  hurt(){ this.tone(140, 0.24, 'sawtooth', 0.2, 60); },
+  levelup(){ [523,659,784,1046].forEach((f,i)=> setTimeout(()=>this.tone(f,0.25,'sine',0.18), i*90)); },
+  victory(){ [392,523,659,784].forEach((f,i)=> setTimeout(()=>this.tone(f,0.35,'triangle',0.18), i*130)); },
+  defeat(){ [330,262,196,147].forEach((f,i)=> setTimeout(()=>this.tone(f,0.45,'sine',0.16), i*160)); },
+  bolt(){ this.noise(0.24, 0.32, 5000); this.tone(1200, 0.1, 'square', 0.08, 200); },
+  seal(){ this.tone(300, 0.3, 'triangle', 0.13, 200); },
+  heal(){ this.tone(440, 0.3, 'sine', 0.16, 660); setTimeout(()=>this.tone(660,0.35,'sine',0.14,880), 120); }
+};
+
+/* ============================================================
+   游戏数据
+   ============================================================ */
+const state = {
+  scene: 'loading',
+  time: 0,
+  loadT: 0,
+  cleared: [false,false,false,false],
+  endlessBest: 0,
+  player: {
+    level: 1,
+    exp: 0,
+    credits: 0,
+    get maxHp(){ return 500 + (this.level-1)*60; },
+    get atk(){ return 100 * (1 + 0.12*(this.level-1)); },
+    get expNeed(){ return 100 + (this.level-1)*80; }
+  },
+  skills: {
+    dodge:   { key:'dodge',   short:'零式', name:'流云', full:'基础剑法 · 零式「流云」', shape:'横线', effect:'无敌 0.45 秒', cdText:'0.5 秒', unlocked:true,  prof:0, cd:0, cdMax:0.50, cost:0    },
+    strike:  { key:'strike',  short:'一式', name:'破山', full:'基础剑法 · 一式「破山」', shape:'竖线', effect:'攻击 80%', cdText:'1 秒', unlocked:true,  prof:0, cd:0, cdMax:1.00, cost:0    },
+    aoe:     { key:'aoe',     short:'二式', name:'环月', full:'基础剑法 · 二式「环月」', shape:'上凸半圆', effect:'全体 75%', cdText:'1.8 秒', unlocked:false, prof:0, cd:0, cdMax:1.80, cost:500  },
+    dot:     { key:'dot',     short:'三式', name:'缠丝', full:'基础剑法 · 三式「缠丝」', shape:'三角形，底边水平', effect:'5 秒 · 每 0.5 秒造成 25% 攻击 + 3% 敌人上限伤害', cdText:'4 秒', unlocked:false, prof:0, cd:0, cdMax:4.00, cost:1200 },
+    thunder: { key:'thunder', short:'四式', name:'惊雷', full:'基础剑法 · 四式「惊雷」', shape:'闪电', effect:'攻击 70% · 打断蓄力', cdText:'3.5 秒', unlocked:false, prof:0, cd:0, cdMax:3.50, cost:2000 }
+  }
+};
+const SKILL_ORDER = ['dodge','strike','aoe','dot','thunder'];
+
+try {
+  const v = parseInt(localStorage.getItem('fxdx_endless_best')||'0', 10);
+  if (!isNaN(v)) state.endlessBest = v;
+} catch(e){}
+
+const LEVELS = [
+  { name:'校区外围',   sub:'低阶魔物 · 零星',   waves:[2,2,3],       boss:false },
+  { name:'教学楼废墟', sub:'中阶魔物 · 聚集',   waves:[3,3,4],       boss:false },
+  { name:'地下通道',   sub:'高阶魔物 · 涌动',   waves:[3,4,4],       boss:false },
+  { name:'魔物巢穴',   sub:'首领 · 危',         waves:[4,4],         boss:true  },
+  { name:'无尽回廊',   sub:'无尽试炼 · 波次递增', waves:[],          boss:false, endless:true }
+];
+
+function profMult(key){
+  return 1 + (state.skills[key].prof/100) * 0.5;
+}
+function playerAtk(){ return state.player.atk; }
+
+function updateEndlessBest(wave){
+  if (wave > state.endlessBest){
+    state.endlessBest = wave;
+    try { localStorage.setItem('fxdx_endless_best', String(wave)); } catch(e){}
+  }
+}
+
+/* ============================================================
+   对话式引导
+   ============================================================ */
+const introDialogueSeen = { menu:false, levels:false, skills:false, stats:false };
+let introDialogue = null;
+let introLineIdx = 0;
+
+const INTRO_DIALOGUES = {
+  menu: {
+    speaker:'教习 · 沈砚',
+    lines:[
+      '灵气复苏已有五十年。电子设备与热兵器尽数失效，魔物盘踞废墟。',
+      '人类退守避难所，靠着灵气与冷兵器重新站了起来。',
+      '到如今，复兴大学在废墟之上重建，剑法学院以灵气御剑，培养第二代。',
+      '你作为今年入学的新生，清剿魔物、换取积分、修习剑谱、提升修为，一步一步夺回失地吧。'
+    ]
+  },
+  levels: {
+    speaker:'教习 · 沈砚',
+    lines:[
+      '历练就是外出清剿魔物。击败魔物可获得少量灵力为己所用，也能获取学院积分奖励。',
+      '剑法不在力，在于「势」。在战斗界面上划出剑谱所示的剑招，灵力自会随剑而动。',
+      '横向为闪避，纵向为直劈。更高阶的招式，可在学院以积分兑换学习。',
+      '点击敌人可锁定目标。每关数波魔物，全部清完即胜。'
+    ]
+  },
+  skills: {
+    speaker:'教习 · 沈砚',
+    lines:[
+      '这里是剑谱，记录你已学会的招式与熟练度。',
+      '反复使用同一招式会提升熟练度，小幅增强伤害与效果。',
+      '尚未学会的招式可用学院积分兑换。若积分不足，可多多历练清剿魔物。'
+    ]
+  },
+  stats: {
+    speaker:'教习 · 沈砚',
+    lines:[
+      '这是你的属性。境界决定灵力与气血的上限。',
+      '灵力即攻击力，剑法伤害以它为基础；气血归零则力竭。',
+      '积分用于解锁剑谱，经验攒满即可提升境界。'
+    ]
+  }
+};
+
+/* ============================================================
+   输入
+   ============================================================ */
+const pointer = { x:0, y:0, down:false, moved:0, path:[] };
+let pendingBtn = null;
+
+/* 剑谱滚动 */
+const scroll = { offset:0, vel:0, max:0, dragging:false, lastY:0 };
+
+function toLogical(e){
+  const r = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) / r.width * W,
+    y: (e.clientY - r.top) / r.height * H
+  };
+}
+
+function clearBattleDrawing(){
+  if (state.scene === 'battle' && battle){
+    battle.drawing = false;
+    battle.path = [];
+  }
+}
+
+canvas.addEventListener('pointerdown', (e)=>{
+  e.preventDefault();
+  AudioSys.resume();
+  try { canvas.setPointerCapture(e.pointerId); } catch(err){}
+  const p = toLogical(e);
+  pointer.x = p.x; pointer.y = p.y;
+  pointer.down = true;
+  pointer.moved = 0;
+  pointer.path = [{x:p.x, y:p.y}];
+  pendingBtn = null;
+  onPointerDown(p);
+
+  if (state.scene === 'battle' && battle && battle.phase === 'fight' && !introDialogue && !battle.confirmExit && !pendingBtn){
+    battle.drawing = true;
+    battle.path = [{x:p.x, y:p.y}];
+  }
+
+  if (state.scene === 'skills' && !pendingBtn && !introDialogue){
+    scroll.dragging = true;
+    scroll.lastY = p.y;
+    scroll.vel = 0;
+  }
+});
+
+canvas.addEventListener('pointermove', (e)=>{
+  e.preventDefault();
+  if (!pointer.down){
+    if (state.scene === 'battle' && battle && battle.drawing) clearBattleDrawing();
+    return;
+  }
+  const p = toLogical(e);
+  const last = pointer.path[pointer.path.length-1];
+  const d = dist2(p.x,p.y,last.x,last.y);
+  pointer.moved += d;
+  if (d > 5) pointer.path.push({x:p.x, y:p.y});
+  pointer.x = p.x; pointer.y = p.y;
+
+  if (state.scene === 'battle' && battle && battle.drawing){
+    const l2 = battle.path[battle.path.length-1];
+    if (dist2(p.x,p.y,l2.x,l2.y) > 5) battle.path.push({x:p.x,y:p.y});
+  }
+
+  if (state.scene === 'skills' && scroll.dragging){
+    const dy = p.y - scroll.lastY;
+    scroll.offset = clamp(scroll.offset - dy, 0, scroll.max);
+    scroll.vel = -dy;
+    scroll.lastY = p.y;
+  }
+});
+
+canvas.addEventListener('pointerup', (e)=>{
+  e.preventDefault();
+  const wasDown = pointer.down;
+  pointer.down = false;
+  const path = pointer.path.slice();
+  const moved = pointer.moved;
+  pointer.path = [];
+  scroll.dragging = false;
+  if (wasDown){
+    onPointerUp(toLogical(e), path, moved);
+  }
+  clearBattleDrawing();
+});
+
+canvas.addEventListener('pointercancel', ()=>{
+  pointer.down = false;
+  pointer.path = [];
+  pendingBtn = null;
+  scroll.dragging = false;
+  clearBattleDrawing();
+});
+
+/* 鼠标滚轮：剑谱页面滚动 */
+canvas.addEventListener('wheel', (e)=>{
+  if (state.scene !== 'skills' || introDialogue) return;
+  e.preventDefault();
+  let dy = e.deltaY;
+  if (e.deltaMode === 1) dy *= 16;       // 行模式
+  else if (e.deltaMode === 2) dy *= 100; // 页模式
+  scroll.offset = clamp(scroll.offset + dy * 0.6, 0, scroll.max);
+  scroll.vel = 0;
+  scroll.dragging = false;
+}, {passive:false});
+
+/* ============================================================
+   场景：载入
+   ============================================================ */
+function updateLoading(dt){
+  state.loadT += dt;
+  if (state.loadT > 1.6){
+    state.scene = 'menu';
+  }
+}
+function drawLoading(){
+  const t = clamp(state.loadT/1.6, 0, 1);
+  ctx.save();
+  ctx.globalAlpha = 0.9;
+  const r = 30 + Math.sin(state.time*2)*3;
+  inkBlobPath(W/2, H*0.42, r, 99);
+  ctx.fillStyle = INK;
+  ctx.fill();
+  ctx.restore();
+
+  drawText('复兴大学 · 剑法学院', W/2, H*0.56, 34, {align:'center', weight:'600'});
+  const bw = 220, bx = W/2-bw/2, by = H*0.64;
+  ctx.save();
+  ctx.strokeStyle = INK; ctx.lineWidth = 1.5; ctx.globalAlpha = 0.5;
+  ctx.strokeRect(bx,by,bw,6);
+  ctx.fillStyle = INK; ctx.globalAlpha = 0.8;
+  ctx.fillRect(bx, by, bw*t, 6);
+  ctx.restore();
+  drawText('正在唤醒灵脉……', W/2, by+34, 16, {align:'center', alpha:0.55});
+}
+
+/* ============================================================
+   场景：主页
+   ============================================================ */
+let btnList = [];
+function clearBtns(){ btnList = []; }
+function addBtn(x,y,w,h,label,fn,opts){
+  btnList.push(Object.assign({x,y,w,h,label,fn}, opts||{}));
+}
+
+function drawBackgroundCampus(){
+  ctx.save();
+  ctx.globalAlpha = 0.10;
+  ctx.beginPath();
+  ctx.moveTo(-20, 520);
+  ctx.quadraticCurveTo(90, 400, 190, 500);
+  ctx.quadraticCurveTo(300, 380, 420, 490);
+  ctx.quadraticCurveTo(500, 430, 570, 505);
+  ctx.lineTo(570, 620); ctx.lineTo(-20, 620);
+  ctx.closePath();
+  ctx.fillStyle = INK;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+
+  const bx = W/2, by = 600;
+  ctx.save();
+  ctx.globalAlpha = 0.88;
+  ctx.fillStyle = INK;
+  ctx.beginPath();
+  ctx.moveTo(bx-170, by-150);
+  ctx.lineTo(bx, by-235);
+  ctx.lineTo(bx+170, by-150);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillRect(bx-140, by-150, 280, 200);
+  ctx.fillStyle = PAPER;
+  for (let i=0;i<4;i++){
+    for (let j=0;j<2;j++){
+      ctx.fillRect(bx-115+i*62, by-120+j*70, 34, 44);
+    }
+  }
+  ctx.fillRect(bx-26, by-40, 52, 90);
+  ctx.restore();
+
+  ctx.save();
+  ctx.globalAlpha = 0.55;
+  ctx.fillStyle = INK2;
+  const ruinSeeds = [ [40,650,60,90], [90,690,40,50], [470,640,55,100], [420,700,35,40] ];
+  for (const [x,y,w,h] of ruinSeeds){
+    ctx.beginPath();
+    ctx.moveTo(x, y+h);
+    ctx.lineTo(x, y+h*0.35);
+    ctx.lineTo(x+w*0.35, y+h*0.15);
+    ctx.lineTo(x+w*0.6, y+h*0.45);
+    ctx.lineTo(x+w, y+h*0.25);
+    ctx.lineTo(x+w, y+h);
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+
+  ctx.save();
+  ctx.globalAlpha = 0.35;
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 1.5;
+  for (let i=0;i<7;i++){
+    const y = 700 + i*22;
+    ctx.beginPath();
+    ctx.moveTo(20+ (i%3)*30, y);
+    ctx.quadraticCurveTo(W/2, y+8, W-20-(i%2)*40, y-4);
+    ctx.stroke();
+  }
+  ctx.restore();
+  ctx.restore();
+}
+
+function drawMenu(){
+  drawBackgroundCampus();
+
+  ctx.save();
+  ctx.globalAlpha = 0.06;
+  ctx.fillStyle = INK;
+  ctx.fillRect(0, 60, W, 150);
+  ctx.restore();
+
+  drawText('复兴大学', W/2, 118, 44, {align:'center', weight:'700', shadow:true});
+  drawText('剑 法 学 院', W/2, 176, 26, {align:'center', alpha:0.8});
+  ctx.save();
+  ctx.globalAlpha = 0.4;
+  ctx.strokeStyle = INK; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(W/2-130, 205); ctx.lineTo(W/2+130, 205);
+  ctx.stroke();
+  ctx.restore();
+
+  const p = state.player;
+  ctx.save();
+  ctx.globalAlpha = 0.85;
+  roundRectPath(60, 232, W-120, 56, 8);
+  ctx.strokeStyle = 'rgba(28,28,28,0.35)'; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.restore();
+  drawText(`第 ${p.level} 阶`, 88, 260, 20, {weight:'600'});
+  drawText(`灵力 ${Math.round(p.atk)}`, 200, 260, 17, {alpha:0.75});
+  drawText(`积分 ${p.credits}`, 350, 260, 17, {alpha:0.75});
+  ctx.save();
+  ctx.globalAlpha = 0.5;
+  ctx.fillStyle = 'rgba(28,28,28,0.15)';
+  ctx.fillRect(300, 274, 150, 4);
+  ctx.fillStyle = INK;
+  ctx.fillRect(300, 274, 150*clamp(p.exp/p.expNeed,0,1), 4);
+  ctx.restore();
+
+  clearBtns();
+  const menuItems = [
+    { label:'历 练', sub:'外出清剿魔物', fn:()=>{ state.scene='levels'; }},
+    { label:'剑 谱', sub:'招式与熟练度', fn:()=>{ state.scene='skills'; }},
+    { label:'属 性', sub:'境界与灵力',   fn:()=>{ state.scene='stats'; }},
+    { label:'设 置', sub:'音乐与音效',   fn:()=>{ state.scene='settings'; }}
+  ];
+  const bw = 340, bh = 84;
+  menuItems.forEach((it, i)=>{
+    const x = W/2-bw/2, y = 330 + i*100;
+    ctx.save();
+    ctx.globalAlpha = 0.92;
+    roundRectPath(x,y,bw,bh,10);
+    ctx.fillStyle = 'rgba(255,255,255,0.28)';
+    ctx.fill();
+    ctx.restore();
+    sketchRect(x, y, bw, bh, 2, 11+i*7);
+    drawText(it.label, x+56, y+bh/2-6, 30, {weight:'600'});
+    drawText(it.sub, x+58, y+bh/2+24, 14, {alpha:0.5});
+    drawText('›', x+bw-40, y+bh/2, 32, {alpha:0.4});
+    addBtn(x,y,bw,bh, it.label, it.fn);
+  });
+
+  drawText('灵气复苏 · 反攻', W/2, H-40, 14, {align:'center', alpha:0.35});
+}
+
+/* ============================================================
+   场景：关卡选择
+   ============================================================ */
+function drawLevels(){
+  drawBackgroundCampus();
+  ctx.save();
+  ctx.globalAlpha = 0.55;
+  ctx.fillStyle = PAPER;
+  ctx.fillRect(0,0,W,H);
+  ctx.restore();
+
+  drawText('历 练', W/2, 66, 32, {align:'center', weight:'700'});
+  drawText('—— 清剿魔物 · 换取剑谱 ——', W/2, 102, 14, {align:'center', alpha:0.5});
+
+  clearBtns();
+  const cardW = W-80, cardH = 112;
+  LEVELS.forEach((lv,i)=>{
+    const x = 40, y = 136 + i*124;
+    const unlocked = i===0 || state.cleared[i-1] || (lv.endless && state.cleared[3]);
+    const cleared = state.cleared[i];
+
+    ctx.save();
+    ctx.globalAlpha = unlocked ? 0.9 : 0.35;
+    roundRectPath(x,y,cardW,cardH,10);
+    ctx.fillStyle = lv.endless ? 'rgba(140,43,43,0.10)' : 'rgba(255,255,255,0.4)';
+    ctx.fill();
+    ctx.restore();
+    sketchRect(x,y,cardW,cardH, unlocked?2:1.4, 31+i*13);
+
+    if (!unlocked){
+      drawText('未 解 锁', x+cardW/2, y+cardH/2, 20, {align:'center', alpha:0.5});
+    } else {
+      drawText(lv.name, x+26, y+34, 25, {weight:'600', color: lv.endless ? RED : INK});
+      drawText(lv.sub, x+26, y+64, 14, {alpha:0.55});
+      if (lv.endless){
+        const bestTxt = state.endlessBest > 0 ? `最高第 ${state.endlessBest} 波` : '尚无记录';
+        drawText(bestTxt, x+26, y+88, 14, {alpha:0.6, color: state.endlessBest>0?RED:INK});
+      } else {
+        const waveTxt = `共 ${lv.waves.length + (lv.boss?1:0)} 波`;
+        drawText(waveTxt, x+26, y+88, 14, {alpha:0.5});
+        if (cleared){
+          drawText('已通关', x+cardW-30, y+34, 15, {align:'right', color:RED, alpha:0.8});
+        }
+      }
+      drawText('›', x+cardW-32, y+cardH/2+6, 30, {alpha:0.4});
+      addBtn(x,y,cardW,cardH, lv.name, ()=>{ startBattle(i); });
+    }
+  });
+
+  addBtn(20, H-88, 110, 58, '返回', ()=>{ state.scene='menu'; });
+  sketchRect(20, H-88, 110, 58, 1.8, 55);
+  drawText('返回', 75, H-59, 20, {align:'center'});
+}
+
+/* ============================================================
+   场景：剑谱（横向卡片，纵向滚动，高度自适应）
+   ============================================================ */
+function wrapLines(text, x, y, maxW, lineH, size, alpha){
+  const chars = text.split('');
+  let line = '', ly = y;
+  ctx.font = font(size);
+  for (const ch of chars){
+    if (ctx.measureText(line+ch).width > maxW && line.length){
+      drawText(line, x, ly, size, {alpha: alpha===undefined?0.82:alpha});
+      line = ch; ly += lineH;
+    } else line += ch;
+  }
+  if (line){
+    drawText(line, x, ly, size, {alpha: alpha===undefined?0.82:alpha});
+    ly += lineH;
+  }
+  return ly;
+}
+
+function countWrap(text, maxW, size){
+  ctx.save();
+  ctx.font = font(size);
+  let count = 1, line = '';
+  for (const ch of text){
+    if (ctx.measureText(line+ch).width > maxW && line.length){
+      count++; line = ch;
+    } else line += ch;
+  }
+  ctx.restore();
+  return count;
+}
+
+const CARD_LAYOUT = {
+  titleY: 26,
+  shapeY: 48,
+  effectY: 70,
+  effectLineH: 17,
+  cdGap: 22,
+  unlockedBottom: 37,
+  lockedBottom: 52
+};
+
+function cardHeight(key, textW){
+  const s = state.skills[key];
+  const L = Math.max(1, countWrap(`效果：${s.effect}`, textW, 13));
+  const cdY = CARD_LAYOUT.effectY + (L-1)*CARD_LAYOUT.effectLineH + CARD_LAYOUT.cdGap;
+  return cdY + (s.unlocked ? CARD_LAYOUT.unlockedBottom : CARD_LAYOUT.lockedBottom);
+}
+
+function drawSkillCard(key, x, y, w, h, textW, screenTop, screenBottom){
+  const s = state.skills[key];
+  const tx = x + 118;
+
+  ctx.save();
+  ctx.globalAlpha = s.unlocked ? 0.92 : 0.5;
+  roundRectPath(x,y,w,h,10);
+  ctx.fillStyle = 'rgba(255,255,255,0.34)';
+  ctx.fill();
+  ctx.restore();
+  sketchRect(x,y,w,h, s.unlocked?1.8:1.2, 71+SKILL_ORDER.indexOf(key)*17);
+
+  const glyphCy = y + 66;
+  drawShapeGlyph(key, x+62, glyphCy, 38, s.unlocked);
+
+  drawText(s.full, tx, y + CARD_LAYOUT.titleY, 18, {weight:'600', alpha: s.unlocked?1:0.6});
+  drawText(`画法：${s.shape}`, tx, y + CARD_LAYOUT.shapeY, 13, {alpha:0.6});
+  const nextY = wrapLines(`效果：${s.effect}`, tx, y + CARD_LAYOUT.effectY, textW, CARD_LAYOUT.effectLineH, 13, 0.62);
+  const cdY = (nextY - CARD_LAYOUT.effectLineH) + CARD_LAYOUT.cdGap;
+  drawText(`冷却：${s.cdText}`, tx, cdY, 13, {alpha:0.6});
+
+  if (s.unlocked){
+    const barW = textW - 64;
+    const barX = tx;
+    const barY = cdY + 22 - 3;
+    ctx.save();
+    ctx.globalAlpha = 0.15;
+    ctx.fillStyle = INK;
+    ctx.fillRect(barX, barY, barW, 6);
+    ctx.globalAlpha = 0.8;
+    ctx.fillRect(barX, barY, barW*(s.prof/100), 6);
+    ctx.restore();
+    drawText(`熟练 ${Math.round(s.prof)}`, barX + barW + 10, cdY + 26, 12, {alpha:0.55});
+  } else {
+    const canBuy = state.player.credits >= s.cost;
+    const btnY = cdY + 8;
+    drawText(`${s.cost} 积分`, tx, btnY + 21, 14, {color: canBuy?RED:'#888', alpha:0.9});
+    if (canBuy){
+      const bbx = x + w - 96, bby = btnY;
+      const screenY = bby - scroll.offset;
+      ctx.save();
+      ctx.globalAlpha = 0.8;
+      sketchRect(bbx, bby, 78, 34, 1.5, 91);
+      drawText('解锁', bbx+39, bby+17, 16, {align:'center'});
+      ctx.restore();
+      if (screenY + 34 > screenTop && screenY < screenBottom){
+        addBtn(bbx, screenY, 78, 34, '解锁', ()=>{
+          state.player.credits -= s.cost;
+          s.unlocked = true;
+        });
+      }
+    }
+  }
+}
+
+function drawSkills(){
+  drawBackgroundCampus();
+  ctx.save();
+  ctx.globalAlpha = 0.6;
+  ctx.fillStyle = PAPER;
+  ctx.fillRect(0,0,W,H);
+  ctx.restore();
+
+  drawText('剑 谱', W/2, 66, 32, {align:'center', weight:'700'});
+  drawText(`积分 ${state.player.credits}`, W/2, 100, 17, {align:'center', alpha:0.65});
+
+  const visibleTop = 120;
+  const visibleBottom = H - 96;
+  const clipH = visibleBottom - visibleTop;
+
+  const cardW = W - 68;
+  const gap = 12;
+  const startY = 132;
+  const textW = cardW - 140;
+
+  const heights = SKILL_ORDER.map(key => cardHeight(key, textW));
+
+  let contentH = 0;
+  heights.forEach((h, i)=>{ contentH += h + (i < heights.length-1 ? gap : 0); });
+  const contentBottom = startY + contentH + 20;
+  scroll.max = Math.max(0, contentBottom - visibleBottom);
+  scroll.offset = clamp(scroll.offset, 0, scroll.max);
+
+  clearBtns();
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, visibleTop, W, clipH);
+  ctx.clip();
+  ctx.translate(0, -scroll.offset);
+
+  let cy = startY;
+  SKILL_ORDER.forEach((key, i)=>{
+    const h = heights[i];
+    const screenY = cy - scroll.offset;
+    if (screenY < visibleBottom + 40 && screenY + h > visibleTop - 40){
+      drawSkillCard(key, 34, cy, cardW, h, textW, visibleTop, visibleBottom);
+    }
+    cy += h + gap;
+  });
+
+  ctx.restore();
+
+  if (scroll.max > 0){
+    const trackX = W-12, trackY = visibleTop, trackH = clipH;
+    const thumbH = Math.max(40, trackH * (clipH / (clipH + scroll.max)));
+    const thumbY = trackY + (trackH - thumbH) * (scroll.offset / scroll.max);
+    ctx.save();
+    ctx.globalAlpha = 0.12;
+    ctx.fillStyle = INK;
+    roundRectPath(trackX-3, trackY, 5, trackH, 2.5);
+    ctx.fill();
+    ctx.globalAlpha = 0.32;
+    roundRectPath(trackX-3, thumbY, 5, thumbH, 2.5);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  if (scroll.max > 0){
+    ctx.save();
+    const gt = ctx.createLinearGradient(0, visibleTop, 0, visibleTop+16);
+    gt.addColorStop(0, 'rgba(239,233,220,0.95)');
+    gt.addColorStop(1, 'rgba(239,233,220,0)');
+    ctx.fillStyle = gt;
+    ctx.fillRect(0, visibleTop, W, 16);
+    const gb = ctx.createLinearGradient(0, visibleBottom-16, 0, visibleBottom);
+    gb.addColorStop(0, 'rgba(239,233,220,0)');
+    gb.addColorStop(1, 'rgba(239,233,220,0.95)');
+    ctx.fillStyle = gb;
+    ctx.fillRect(0, visibleBottom-16, W, 16);
+    ctx.restore();
+  }
+
+  addBtn(20, H-88, 110, 58, '返回', ()=>{ state.scene='menu'; });
+  sketchRect(20, H-88, 110, 58, 1.8, 55);
+  drawText('返回', 75, H-59, 20, {align:'center'});
+}
+
+function drawShapeGlyph(key, cx, cy, size, active){
+  ctx.save();
+  ctx.strokeStyle = active ? INK : '#8a8478';
+  ctx.lineWidth = 3;
+  ctx.lineCap='round';
+  ctx.lineJoin='round';
+  const s = size;
+  ctx.beginPath();
+  if (key === 'dodge'){
+    ctx.moveTo(cx-s*0.7, cy); ctx.lineTo(cx+s*0.7, cy);
+  } else if (key === 'strike'){
+    ctx.moveTo(cx, cy-s*0.7); ctx.lineTo(cx, cy+s*0.7);
+  } else if (key === 'aoe'){
+    ctx.arc(cx, cy + s*0.16, s*0.58, Math.PI, 0, false);
+  } else if (key === 'dot'){
+    ctx.moveTo(cx, cy-s*0.62);
+    ctx.lineTo(cx+s*0.68, cy+s*0.46);
+    ctx.lineTo(cx-s*0.68, cy+s*0.46);
+    ctx.closePath();
+  } else if (key === 'thunder'){
+    ctx.moveTo(cx+s*0.55, cy-s*0.55);
+    ctx.lineTo(cx-s*0.12, cy-s*0.08);
+    ctx.lineTo(cx+s*0.12, cy+s*0.08);
+    ctx.lineTo(cx-s*0.55, cy+s*0.55);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+/* ============================================================
+   场景：属性
+   ============================================================ */
+function drawStats(){
+  drawBackgroundCampus();
+  ctx.save();
+  ctx.globalAlpha = 0.62;
+  ctx.fillStyle = PAPER;
+  ctx.fillRect(0,0,W,H);
+  ctx.restore();
+
+  drawText('属 性', W/2, 70, 32, {align:'center', weight:'700'});
+
+  const p = state.player;
+  const rows = [
+    ['境 界', `第 ${p.level} 阶`],
+    ['灵 力', `${Math.round(p.atk)}`],
+    ['气 血', `${p.maxHp}`],
+    ['积 分', `${p.credits}`],
+    ['经 验', `${p.exp} / ${p.expNeed}`],
+  ];
+  rows.forEach((r,i)=>{
+    const y = 160 + i*62;
+    ctx.save();
+    ctx.globalAlpha = 0.3;
+    ctx.strokeStyle = INK; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(70, y+22); ctx.lineTo(W-70, y+22); ctx.stroke();
+    ctx.restore();
+    drawText(r[0], 76, y, 20, {weight:'600'});
+    drawText(r[1], W-76, y, 20, {align:'right'});
+  });
+
+  drawText('剑法熟练', 76, 500, 20, {weight:'600'});
+  SKILL_ORDER.forEach((k,i)=>{
+    const s = state.skills[k];
+    const y = 540 + i*48;
+    ctx.save();
+    ctx.globalAlpha = s.unlocked ? 1 : 0.3;
+    drawText(s.full, 76, y, 15);
+    const bw = 140, bx = W-76-bw;
+    ctx.globalAlpha = 0.16; ctx.fillStyle = INK;
+    ctx.fillRect(bx, y-4, bw, 8);
+    ctx.globalAlpha = 0.85;
+    ctx.fillRect(bx, y-4, bw*(s.prof/100), 8);
+    ctx.restore();
+    drawText(`${Math.round(s.prof)}`, W-76, y-18, 12, {align:'right', alpha:0.5});
+  });
+
+  addBtn(20, H-92, 110, 60, '返回', ()=>{ state.scene='menu'; });
+  sketchRect(20, H-92, 110, 60, 1.8, 55);
+  drawText('返回', 75, H-62, 20, {align:'center'});
+}
+
+/* ============================================================
+   场景：设置
+   ============================================================ */
+function drawSettings(){
+  drawBackgroundCampus();
+  ctx.save();
+  ctx.globalAlpha = 0.62;
+  ctx.fillStyle = PAPER;
+  ctx.fillRect(0,0,W,H);
+  ctx.restore();
+
+  drawText('设 置', W/2, 90, 32, {align:'center', weight:'700'});
+
+  clearBtns();
+  const items = [
+    ['音 乐', ()=>settings.music],
+    ['音 效', ()=>settings.sfx],
+  ];
+  items.forEach((it,i)=>{
+    const y = 200 + i*96;
+    drawText(it[0], 84, y, 24, {weight:'600'});
+    const on = it[1]();
+    const bx = W-190;
+    roundRectPath(bx, y-24, 106, 48, 24);
+    ctx.save();
+    ctx.globalAlpha = 0.25; ctx.strokeStyle = INK; ctx.lineWidth = 1.6; ctx.stroke();
+    ctx.restore();
+    ctx.save();
+    ctx.fillStyle = on ? INK : 'rgba(28,28,28,0.25)';
+    ctx.beginPath();
+    ctx.arc(bx + (on?82:24), y, 17, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+    drawText(on?'开':'关', bx+53, y, 15, {align:'center', alpha:0.6});
+    addBtn(bx-20, y-28, 150, 56, '', ()=>{
+      if (i===0) settings.music = !settings.music;
+      else settings.sfx = !settings.sfx;
+    });
+  });
+
+  const ex = W/2-100, ey = 430;
+  sketchRect(ex, ey, 200, 62, 1.8, 61);
+  drawText('返回主页', W/2, ey+31, 22, {align:'center'});
+  addBtn(ex, ey, 200, 62, '返回主页', ()=>{ state.scene='menu'; });
+
+  drawText('复兴大学 · 剑法学院  v1.2', W/2, H-70, 13, {align:'center', alpha:0.35});
+}
+
+/* ============================================================
+   对话式引导绘制
+   ============================================================ */
+function drawTeacherPortrait(hx, hy){
+  ctx.save();
+  ctx.fillStyle = INK;
+  ctx.beginPath();
+  ctx.arc(hx, hy-27, 9, 0, Math.PI*2);
+  ctx.fill();
+  ctx.strokeStyle = PAPER;
+  ctx.lineWidth = 2.2;
+  ctx.beginPath();
+  ctx.arc(hx, hy-27, 9, -0.4, Math.PI+0.4);
+  ctx.stroke();
+  ctx.fillStyle = INK;
+  ctx.beginPath();
+  ctx.moveTo(hx-19, hy+6);
+  ctx.quadraticCurveTo(hx-22, hy-16, hx, hy-18);
+  ctx.quadraticCurveTo(hx+22, hy-16, hx+19, hy+6);
+  ctx.quadraticCurveTo(hx+16, hy-6, hx+13, hy-8);
+  ctx.quadraticCurveTo(hx, hy-12, hx-13, hy-8);
+  ctx.quadraticCurveTo(hx-16, hy-6, hx-19, hy+6);
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle = '#f6f0e4';
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 1.6;
+  ctx.beginPath();
+  ctx.ellipse(hx, hy+7, 16.5, 19.5, 0, 0, Math.PI*2);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = '#f6f0e4';
+  ctx.beginPath(); ctx.arc(hx-16.5, hy+7, 3.6, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.arc(hx+16.5, hy+7, 3.6, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 1.4;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(hx-10, hy+1);
+  ctx.quadraticCurveTo(hx-6.5, hy-1.5, hx-3, hy+1);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(hx+10, hy+1);
+  ctx.quadraticCurveTo(hx+6.5, hy-1.5, hx+3, hy+1);
+  ctx.stroke();
+
+  ctx.fillStyle = INK;
+  ctx.beginPath(); ctx.arc(hx-6.5, hy+5.5, 2.1, 0, Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(hx+6.5, hy+5.5, 2.1, 0, Math.PI*2); ctx.fill();
+
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 1.1;
+  ctx.beginPath();
+  ctx.moveTo(hx, hy+8);
+  ctx.lineTo(hx, hy+13);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(hx-4.5, hy+17);
+  ctx.quadraticCurveTo(hx, hy+18.5, hx+4.5, hy+17);
+  ctx.stroke();
+
+  ctx.fillStyle = INK;
+  ctx.beginPath();
+  ctx.moveTo(hx-17, hy+25);
+  ctx.quadraticCurveTo(hx, hy+19, hx+17, hy+25);
+  ctx.lineTo(hx+21, hy+33);
+  ctx.lineTo(hx-21, hy+33);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = PAPER;
+  ctx.lineWidth = 2.4;
+  ctx.beginPath();
+  ctx.moveTo(hx-8, hy+22);
+  ctx.lineTo(hx+2, hy+33);
+  ctx.moveTo(hx+8, hy+22);
+  ctx.lineTo(hx-2, hy+33);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawIntroDialogue(){
+  const d = introDialogue;
+  ctx.save();
+  ctx.globalAlpha = 0.38;
+  ctx.fillStyle = INK;
+  ctx.fillRect(0,0,W,H);
+  ctx.restore();
+
+  const bx = 28, by = H-372, bw = W-56, bh = 312;
+  ctx.save();
+  ctx.fillStyle = PAPER;
+  roundRectPath(bx, by, bw, bh, 14);
+  ctx.fill();
+  ctx.restore();
+  sketchRect(bx, by, bw, bh, 2, 801);
+
+  drawTeacherPortrait(bx+58, by+48);
+
+  drawText(d.speaker, bx+104, by+46, 20, {weight:'600'});
+  ctx.save();
+  ctx.globalAlpha = 0.28; ctx.strokeStyle = INK; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(bx+104, by+68); ctx.lineTo(bx+bw-24, by+68); ctx.stroke();
+  ctx.restore();
+
+  const line = d.lines[introLineIdx] || '';
+  wrapLines(line, bx+28, by+100, bw-56, 30, 18, 0.9);
+
+  drawText(`${introLineIdx+1} / ${d.lines.length}`, bx+bw-28, by+bh-26, 12, {align:'right', alpha:0.35});
+
+  const blink = 0.4 + Math.sin(state.time*4)*0.35;
+  drawText('▽', bx+bw-70, by+bh-26, 18, {align:'center', alpha: blink*0.8});
+
+  addBtn(0,0,W,H,'', ()=>{
+    introLineIdx++;
+    if (introLineIdx >= d.lines.length){
+      introDialogue = null;
+      introLineIdx = 0;
+    }
+  });
+}
+
+/* ============================================================
+   战斗系统
+   ============================================================ */
+let battle = null;
+let floaters = [];
+let effects = [];
+
+const PLAYER_X = W/2;
+const PLAYER_Y = H - 120;
+
+const ANIM_DUR = { dodge:0.45, strike:0.26, aoe:0.46, dot:0.34, thunder:0.40 };
+
+function getPositions(n, yBase){
+  yBase = (yBase === undefined) ? 320 : yBase;
+  const out = [];
+  if (n === 1) { out.push({x:W/2, y:yBase}); return out; }
+  const gap = Math.min(175, (W-130)/(n-1));
+  const startX = W/2 - gap*(n-1)/2;
+  for (let i=0;i<n;i++){
+    out.push({ x: startX + gap*i, y: yBase + (i%2)*46 });
+  }
+  return out;
+}
+
+function makeEnemy(x, y, isBoss){
+  return {
+    x, y, isBoss,
+    seed: Math.floor(Math.random()*100000),
+    maxHp: isBoss ? 2000 : 250,
+    hp: isBoss ? 2000 : 250,
+    atk: 45,
+    atkInterval: 3,
+    atkTimer: isBoss ? (3 + Math.random()*1) : Math.random()*2,
+    atkMode: 'throw',
+    state: 'idle',
+    teleTimer: 0,
+    burstTimer: 0,
+    tickTimer: 0,
+    dotTime: 0,
+    dotTick: 0,
+    flash: 0,
+    dead: false,
+    bob: Math.random()*Math.PI*2,
+    r: isBoss ? 68 : 42
+  };
+}
+
+function scaleEnemy(e, hpScale, atkScale){
+  e.maxHp = Math.round(e.maxHp * hpScale);
+  e.hp = e.maxHp;
+  e.atk = Math.round(e.atk * atkScale);
+}
+
+function endlessWaveConfig(wave){
+  const count = Math.min(2 + Math.floor(wave/2), 5);
+  const hpScale = 1 + (wave-1)*0.10;
+  const atkScale = 1 + (wave-1)*0.06;
+  let bossCount = 0;
+  if (wave >= 5){
+    const chance = Math.min(0.15 + wave*0.015, 0.55);
+    if (wave % 5 === 0 || Math.random() < chance) bossCount = 1;
+  }
+  const small = Math.max(1, count - (bossCount ? 2 : 0));
+  return { small, bossCount, hpScale, atkScale };
+}
+
+function endlessReviveCost(count){
+  return 100 + 200*count + 150*count*count;
+}
+
+function startBattle(levelIdx){
+  const lv = LEVELS[levelIdx];
+  const waves = lv.endless ? [] : lv.waves.slice();
+  if (lv.boss) waves.push('BOSS');
+  battle = {
+    lv, levelIdx, waves,
+    endless: !!lv.endless,
+    reviveCount: 0,
+    waveIdx: -1,
+    enemies: [],
+    projectiles: [],
+    target: null,
+    phase: 'fight',
+    lastPhase: 'fight',
+    phaseTimer: 0,
+    dodgeTime: 0,
+    drawing: false,
+    path: [],
+    playerAnim: null,
+    hp: state.player.maxHp,
+    maxHp: state.player.maxHp,
+    shake: 0,
+    flash: 0,
+    hint: '',
+    hintTimer: 0,
+    reward: 0,
+    expGain: 0,
+    dodgeFx: 0,
+    confirmExit: false
+  };
+  floaters = [];
+  effects = [];
+  for (const k in state.skills) state.skills[k].cd = 0;
+  state.scene = 'battle';
+  nextWave();
+}
+
+function nextWave(){
+  const b = battle;
+  b.waveIdx++;
+
+  if (!b.endless){
+    if (b.waveIdx >= b.waves.length){
+      b.phase = 'victory';
+      b.phaseTimer = 0;
+      state.cleared[b.levelIdx] = true;
+      return;
+    }
+  } else {
+    if (b.waveIdx > 0){
+      b.hp = Math.min(b.maxHp, b.hp + b.maxHp*0.10);
+    }
+  }
+
+  const w = b.endless ? null : b.waves[b.waveIdx];
+  b.enemies = [];
+  b.projectiles = [];
+  b.target = null;
+  b.playerAnim = null;
+
+  if (b.endless){
+    const wave = b.waveIdx + 1;
+    const cfg = endlessWaveConfig(wave);
+    if (cfg.bossCount){
+      const boss = makeEnemy(W/2, 230, true);
+      scaleEnemy(boss, cfg.hpScale, cfg.atkScale);
+      b.enemies.push(boss);
+      const pos = getPositions(cfg.small, 360);
+      for (let i=0;i<cfg.small;i++){
+        const e = makeEnemy(pos[i].x, pos[i].y, false);
+        scaleEnemy(e, cfg.hpScale, cfg.atkScale);
+        b.enemies.push(e);
+      }
+      b.hint = `第 ${wave} 波 · 首领现身`;
+      b.hintTimer = 2.5;
+    } else {
+      const pos = getPositions(cfg.small, 320);
+      for (let i=0;i<cfg.small;i++){
+        const e = makeEnemy(pos[i].x, pos[i].y, false);
+        scaleEnemy(e, cfg.hpScale, cfg.atkScale);
+        b.enemies.push(e);
+      }
+      b.hint = '';
+    }
+  } else if (w === 'BOSS'){
+    b.enemies.push(makeEnemy(W/2, 230, true));
+    const pos = getPositions(2, 360);
+    for (let i=0;i<2;i++){
+      b.enemies.push(makeEnemy(pos[i].x, pos[i].y, false));
+    }
+    b.hint = '首领现身！用「四式」打断蓄力！';
+    b.hintTimer = 3.2;
+  } else {
+    const pos = getPositions(w, 320);
+    for (let i=0;i<w;i++) b.enemies.push(makeEnemy(pos[i].x, pos[i].y, false));
+    b.hint = '';
+  }
+  b.phase = 'fight';
+}
+
+function updateBattle(dt){
+  const b = battle;
+  if (!b) return;
+  if (b.confirmExit) return;
+  b.shake = Math.max(0, b.shake - dt*10);
+  b.dodgeTime = Math.max(0, b.dodgeTime - dt);
+  b.dodgeFx = Math.max(0, b.dodgeFx - dt*4);
+  b.flash = Math.max(0, b.flash - dt*4);
+  if (b.hintTimer > 0) b.hintTimer -= dt;
+
+  if (b.playerAnim){
+    b.playerAnim.t += dt;
+    if (b.playerAnim.t >= b.playerAnim.dur) b.playerAnim = null;
+  }
+
+  for (const k in state.skills){
+    state.skills[k].cd = Math.max(0, state.skills[k].cd - dt);
+  }
+
+  if (b.phase === 'fight'){
+    for (const e of b.enemies) updateEnemy(e, dt);
+    updateProjectiles(dt);
+
+    if (b.target && (b.target.dead)) b.target = null;
+    if (b.enemies.every(e=>e.dead)){
+      b.enemies = [];
+      b.phase = 'clear';
+      b.phaseTimer = 1.0;
+    }
+  } else if (b.phase === 'clear'){
+    b.phaseTimer -= dt;
+    if (b.phaseTimer <= 0) nextWave();
+  } else if (b.phase === 'victory' || b.phase === 'defeat'){
+    b.phaseTimer += dt;
+  }
+
+  if (b.phase !== b.lastPhase){
+    b.lastPhase = b.phase;
+    if (b.phase === 'victory') AudioSys.victory();
+    else if (b.phase === 'defeat') AudioSys.defeat();
+  }
+
+  for (let i=floaters.length-1;i>=0;i--){
+    const f = floaters[i];
+    f.y -= dt*60;
+    f.life -= dt;
+    if (f.life <= 0) floaters.splice(i,1);
+  }
+  for (let i=effects.length-1;i>=0;i--){
+    const ef = effects[i];
+    ef.t += dt;
+    if (ef.t > ef.dur) effects.splice(i,1);
+  }
+
+  if (b.hp <= 0 && b.phase === 'fight'){
+    b.hp = 0;
+    b.phase = 'defeat';
+    b.phaseTimer = 0;
+    if (b.endless){
+      updateEndlessBest(b.waveIdx + 1);
+    }
+  }
+}
+
+function updateEnemy(e, dt){
+  if (e.dead) return;
+  e.bob += dt*2;
+  e.flash = Math.max(0, e.flash - dt*5);
+
+  if (e.dotTime > 0){
+    e.dotTime -= dt;
+    e.dotTick -= dt;
+    if (e.dotTick <= 0){
+      e.dotTick += 0.5;
+      const dmg = playerAtk()*0.25*profMult('dot') + e.maxHp*0.03;
+      damageEnemy(e, dmg, 'dot');
+    }
+  }
+  if (e.dead) return;
+
+  if (e.state === 'idle'){
+    e.atkTimer -= dt;
+    if (e.atkTimer <= 0){
+      if (e.isBoss){
+        e.atkMode = Math.random() < 0.5 ? 'throw' : 'burst';
+        e.state = 'telegraph';
+        e.teleTimer = e.atkMode === 'burst' ? 1.9 : 0.9;
+      } else {
+        e.state = 'telegraph';
+        e.teleTimer = 0.6;
+      }
+    }
+  } else if (e.state === 'telegraph'){
+    e.teleTimer -= dt;
+    if (e.teleTimer <= 0){
+      if (e.isBoss && e.atkMode === 'burst'){
+        e.state = 'burst';
+        e.burstTimer = 2.5;
+        e.tickTimer = 0.5;
+      } else {
+        spawnProjectile(e);
+        e.state = 'idle';
+        e.atkTimer = e.atkInterval * (0.8 + Math.random()*0.5);
+      }
+    }
+  } else if (e.state === 'burst'){
+    e.burstTimer -= dt;
+    e.tickTimer -= dt;
+    if (e.tickTimer <= 0){
+      e.tickTimer += 0.5;
+      hitPlayer(Math.round(e.atk * 0.7), PLAYER_X, PLAYER_Y, true);
+      effects.push({type:'impact', x:PLAYER_X, y:PLAYER_Y, t:0, dur:0.25});
+    }
+    if (e.burstTimer <= 0){
+      e.state = 'idle';
+      e.atkTimer = e.atkInterval * (0.8 + Math.random()*0.5);
+    }
+  }
+}
+
+/* ---------- 投射物 ---------- */
+function spawnProjectile(e){
+  const b = battle;
+  if (!b) return;
+  const sx = e.x, sy = e.y + 6;
+  const dx = PLAYER_X - sx, dy = PLAYER_Y - sy;
+  const d = Math.hypot(dx,dy) || 1;
+  const speed = e.isBoss ? 500 : 640;
+  b.projectiles.push({
+    x: sx, y: sy,
+    vx: dx/d*speed, vy: dy/d*speed,
+    damage: e.atk,
+    size: e.isBoss ? 17 : 10,
+    isBoss: e.isBoss,
+    trail: [],
+    t: 0
+  });
+  AudioSys.tone(e.isBoss ? 220 : 300, 0.1, 'triangle', 0.06, 180);
+}
+
+function updateProjectiles(dt){
+  const b = battle;
+  for (let i=b.projectiles.length-1;i>=0;i--){
+    const p = b.projectiles[i];
+    p.t += dt;
+    p.trail.push({x:p.x, y:p.y});
+    if (p.trail.length > 9) p.trail.shift();
+    p.x += p.vx*dt;
+    p.y += p.vy*dt;
+
+    if (dist2(p.x, p.y, PLAYER_X, PLAYER_Y) < 34){
+      hitPlayer(p.damage, PLAYER_X, PLAYER_Y);
+      effects.push({type:'impact', x:PLAYER_X, y:PLAYER_Y, t:0, dur:0.25});
+      b.projectiles.splice(i,1);
+      continue;
+    }
+    if (p.t > 3 || p.x < -60 || p.x > W+60 || p.y > H+60){
+      b.projectiles.splice(i,1);
+    }
+  }
+}
+
+function hitPlayer(dmg, hx, hy, unblockable){
+  const b = battle;
+  if (!b || b.phase !== 'fight') return false;
+  hx = hx===undefined ? PLAYER_X : hx;
+  hy = hy===undefined ? H-180 : hy;
+  if (!unblockable && b.dodgeTime > 0){
+    addFloater('闪避', hx, hy, '#3a6a8a');
+    effects.push({type:'dodgeSpark', x:hx, y:hy, t:0, dur:0.35});
+    AudioSys.dodge();
+    return false;
+  }
+  b.hp -= dmg;
+  b.flash = 0.6;
+  b.shake = 0.35;
+  addFloater(`-${dmg}`, hx + (Math.random()-0.5)*40, hy, RED);
+  AudioSys.hurt();
+  if (b.hp < 0) b.hp = 0;
+  return true;
+}
+
+function damageEnemy(e, dmg, type){
+  if (e.dead) return;
+  e.hp -= dmg;
+  e.flash = 1;
+  addFloater(Math.round(dmg).toString(), e.x + (Math.random()-0.5)*20, e.y - 30, type==='dot' ? '#5a7a5a' : INK);
+  if (type !== 'dot') AudioSys.hit();
+  if (e.hp <= 0){
+    e.hp = 0;
+    e.dead = true;
+    const credits = e.isBoss ? 500 : 50;
+    const exp = e.isBoss ? 200 : 20;
+    state.player.credits += credits;
+    state.player.exp += exp;
+    battle.reward += credits;
+    battle.expGain += exp;
+    addFloater(`+${credits}`, e.x, e.y-56, '#6a5a2a');
+    effects.push({ type:'dissolve', x:e.x, y:e.y, r:e.r, t:0, dur:0.7 });
+    checkLevelUp();
+  }
+}
+
+function checkLevelUp(){
+  const p = state.player;
+  while (p.exp >= p.expNeed){
+    p.exp -= p.expNeed;
+    p.level++;
+    addFloater('境界提升！', W/2, H*0.45, RED);
+    effects.push({ type:'ring', x:W/2, y:H/2, t:0, dur:1.0, r0:20, r1:260 });
+    AudioSys.levelup();
+  }
+}
+
+function addFloater(text, x, y, color){
+  floaters.push({ text, x, y, color: color||INK, life: 0.9, maxLife: 0.9 });
+}
+
+/* ---------- 无尽复活 ---------- */
+function reviveEndless(){
+  const b = battle;
+  if (!b || !b.endless || b.phase !== 'defeat') return;
+  const cost = endlessReviveCost(b.reviveCount);
+  if (state.player.credits < cost) return;
+  state.player.credits -= cost;
+  b.reviveCount++;
+  b.hp = Math.round(b.maxHp * 0.6);
+  b.phase = 'fight';
+  b.phaseTimer = 0;
+  b.projectiles = [];
+  for (const e of b.enemies){
+    if (e.dead) continue;
+    e.state = 'idle';
+    e.atkTimer = Math.max(1.5, e.atkInterval);
+    e.burstTimer = 0;
+    e.tickTimer = 0;
+  }
+  b.dodgeTime = 1.0;
+  b.dodgeFx = 1;
+  effects.push({type:'ring', x:PLAYER_X, y:PLAYER_Y, t:0, dur:0.7, r0:10, r1:200});
+  addFloater('医疗队抵达', PLAYER_X, PLAYER_Y-90, RED);
+  AudioSys.heal();
+}
+
+/* ---------- 出招 ---------- */
+function classifyPath(pts){
+  if (pts.length < 4) return null;
+  let len = 0;
+  for (let i=1;i<pts.length;i++) len += dist2(pts[i].x,pts[i].y,pts[i-1].x,pts[i-1].y);
+  if (len < 70) return null;
+
+  let minX=1e9,maxX=-1e9,minY=1e9,maxY=-1e9;
+  for (const p of pts){
+    if (p.x<minX)minX=p.x; if(p.x>maxX)maxX=p.x;
+    if (p.y<minY)minY=p.y; if(p.y>maxY)maxY=p.y;
+  }
+  const diag = Math.hypot(maxX-minX, maxY-minY);
+  if (diag < 50) return null;
+
+  const first = pts[0], last = pts[pts.length-1];
+  const closeDist = dist2(last.x, last.y, first.x, first.y);
+  const closed = closeDist < diag*0.35;
+
+  let totalTurn = 0;
+  for (let i=1;i<pts.length-1;i++){
+    const a1 = Math.atan2(pts[i].y-pts[i-1].y, pts[i].x-pts[i-1].x);
+    const a2 = Math.atan2(pts[i+1].y-pts[i].y, pts[i+1].x-pts[i].x);
+    let d = a2-a1;
+    while (d > Math.PI) d -= Math.PI*2;
+    while (d < -Math.PI) d += Math.PI*2;
+    totalTurn += d;
+  }
+  const absTurn = Math.abs(totalTurn);
+
+  const s = rdp(pts, 20);
+  let sharp = 0;
+  for (let i=1;i<s.length-1;i++){
+    const a1 = Math.atan2(s[i].y-s[i-1].y, s[i].x-s[i-1].x);
+    const a2 = Math.atan2(s[i+1].y-s[i].y, s[i+1].x-s[i].x);
+    let d = Math.abs(a1-a2);
+    if (d > Math.PI) d = Math.PI*2 - d;
+    if (d > Math.PI/3) sharp++;
+  }
+
+  // 闭合路径：只认底边水平三角
+  if (closed){
+    if (isTrianglePath(pts, s)) return 'triangle';
+    return null;
+  }
+
+  // 开放路径
+  const dx = last.x - first.x;
+  const dy = last.y - first.y;
+  const absDx = Math.abs(dx);
+  const absDy = Math.abs(dy);
+  const chord = Math.hypot(dx, dy);
+
+  // 闪电：有折角 + 方向右上至左下
+  if (sharp >= 2){
+    if (dx < -10 && dy > 10) return 'thunder';
+    // 方向不对不直接 return null，继续往下判断
+  }
+
+  // 上凸半圆：总转角接近 PI，且最大偏离相对弦长足够大，中点高于弦中点
+  if (absTurn > 2.0 && absTurn < 4.5 && sharp <= 1 && chord > 40){
+    let maxDev = 0;
+    for (const p of pts){
+      const d = perpDist(p, first, last);
+      if (d > maxDev) maxDev = d;
+    }
+    if (maxDev > chord * 0.20){
+      const mid = pts[Math.floor(pts.length/2)];
+      const midY = (first.y + last.y)/2;
+      if (mid.y < midY - 8) return 'circle';
+      return null; // 明显弧线但不是上凸
+    }
+  }
+
+  // 直线兜底：横向占优 → 闪避，否则直劈
+  if (absDx > absDy * 1.2) return 'dodge';
+  return 'strike';
+}
+
+function isTrianglePath(pts, s){
+  let v = [];
+  for (const p of s){
+    if (!v.length || dist2(p.x,p.y, v[v.length-1].x, v[v.length-1].y) > 12) v.push(p);
+  }
+  if (v.length > 3 && dist2(v[0].x,v[0].y, v[v.length-1].x,v[v.length-1].y) < 22) v.pop();
+
+  if (v.length === 4){
+    let best = null, bestArea = -1;
+    for (let i=0;i<4;i++){
+      const tri = v.filter((_,j)=>j!==i);
+      const area = Math.abs((tri[1].x-tri[0].x)*(tri[2].y-tri[0].y) - (tri[2].x-tri[0].x)*(tri[1].y-tri[0].y));
+      if (area > bestArea){ bestArea = area; best = tri; }
+    }
+    v = best;
+  }
+  if (v.length !== 3) return false;
+
+  for (let i=0;i<3;i++){
+    const a = v[i], b = v[(i+1)%3], c = v[(i+2)%3];
+    const dx = Math.abs(a.x-b.x), dy = Math.abs(a.y-b.y);
+    if (dx > 40 && dy < dx*0.3){
+      const baseY = (a.y+b.y)/2;
+      if (c.y < baseY - 10) return true;
+    }
+  }
+  return false;
+}
+
+const SHAPE_TO_SKILL = {
+  'dodge':'dodge', 'strike':'strike', 'circle':'aoe', 'triangle':'dot', 'thunder':'thunder'
+};
+
+function getLivingEnemies(){
+  if (!battle) return [];
+  return battle.enemies.filter(e=>!e.dead);
+}
+
+function pickTarget(){
+  const living = getLivingEnemies();
+  if (!living.length) return null;
+  if (battle.target && !battle.target.dead) return battle.target;
+  let best = living[0], bd = Infinity;
+  for (const e of living){
+    const d = dist2(e.x, e.y, W/2, H-120);
+    if (d < bd){ bd = d; best = e; }
+  }
+  return best;
+}
+
+function castSkill(key, dir){
+  const b = battle;
+  if (!b || b.phase !== 'fight' || b.confirmExit) return;
+  const s = state.skills[key];
+  if (!s.unlocked){
+    addFloater('尚未习得', W/2, H*0.5, '#888');
+    return;
+  }
+  if (s.cd > 0){
+    addFloater('调息中', W/2, H*0.5, '#888');
+    return;
+  }
+  s.cd = s.cdMax;
+  s.prof = Math.min(100, s.prof + 2);
+
+  const anim = { key, t:0, dur: ANIM_DUR[key] || 0.32 };
+  if (key === 'dodge') anim.dir = dir || 1;
+  b.playerAnim = anim;
+
+  const atk = playerAtk();
+  const pm = profMult(key);
+
+  if (key === 'dodge'){
+    b.dodgeTime = 0.45;
+    b.dodgeFx = 1;
+    // addFloater('闪避', W/2, H-210, '#3a6a8a');
+    effects.push({ type:'afterimage', x:W/2, y:H-120, t:0, dur:0.35 });
+    AudioSys.dodge();
+  }
+  else if (key === 'strike'){
+    const t = pickTarget();
+    if (t){
+      damageEnemy(t, atk * 0.80 * pm, 'strike');
+      effects.push({ type:'slash', x:t.x, y:t.y, t:0, dur:0.3, angle:-Math.PI/2 });
+    }
+    AudioSys.slash();
+  }
+  else if (key === 'aoe'){
+    const living = getLivingEnemies();
+    if (living.length){
+      for (const e of living) damageEnemy(e, atk * 0.75 * pm, 'aoe');
+      effects.push({ type:'ring', x:W/2, y:H-220, t:0, dur:0.5, r0:40, r1:420 });
+    }
+    AudioSys.slash();
+    AudioSys.tone(330, 0.25, 'sine', 0.12, 520);
+  }
+  else if (key === 'dot'){
+    const t = pickTarget();
+    if (t){
+      t.dotTime = 5;
+      t.dotTick = 0.5;
+      effects.push({ type:'seal', x:t.x, y:t.y, t:0, dur:0.6 });
+      addFloater('剑气缠身', t.x, t.y+30, '#5a7a5a');
+    }
+    AudioSys.seal();
+  }
+  else if (key === 'thunder'){
+    const t = pickTarget();
+    if (t){
+      damageEnemy(t, atk * 0.70 * pm, 'thunder');
+      if (t.state === 'telegraph' || t.state === 'burst'){
+        t.state = 'idle';
+        t.atkTimer = t.atkInterval;
+        t.teleTimer = 0;
+        t.burstTimer = 0;
+        addFloater('打断！', t.x, t.y-70, RED);
+      }
+      effects.push({ type:'bolt', x:t.x, y:t.y, t:0, dur:0.3 });
+    }
+    AudioSys.bolt();
+  }
+}
+
+/* ---------- 战斗绘制 ---------- */
+function drawBattle(){
+  const b = battle;
+
+  ctx.save();
+  ctx.fillStyle = PAPER;
+  ctx.fillRect(0,0,W,H);
+  ctx.drawImage(paperTex, 0, 0);
+
+  ctx.globalAlpha = 0.09;
+  ctx.fillStyle = INK;
+  const rndB = mulberry32(1234);
+  for (let i=0;i<9;i++){
+    const bx = i*64 - 20;
+    const bh = 60 + rndB()*120;
+    ctx.fillRect(bx, 560-bh, 50, bh);
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+
+  const sh = b.shake;
+  ctx.save();
+  if (sh > 0){
+    ctx.translate((Math.random()-0.5)*sh*22, (Math.random()-0.5)*sh*22);
+  }
+
+  for (const e of b.enemies){
+    if (!e.dead) drawEnemy(e);
+  }
+
+  drawProjectiles();
+  drawPlayer();
+  drawBurstEffects();
+  drawEffects();
+
+  if (b.drawing && b.path.length > 1 && !b.confirmExit){
+    drawGesturePath(b.path);
+  }
+
+  ctx.restore();
+
+  if (b.flash > 0){
+    ctx.save();
+    ctx.globalAlpha = b.flash*0.22;
+    ctx.fillStyle = RED;
+    ctx.fillRect(0,0,W,H);
+    ctx.restore();
+  }
+
+  for (const f of floaters){
+    const a = clamp(f.life/f.maxLife, 0, 1);
+    ctx.save();
+    ctx.globalAlpha = a;
+    drawText(f.text, f.x, f.y, 22, {align:'center', color:f.color, weight:'600'});
+    ctx.restore();
+  }
+
+  drawBattleUI();
+}
+
+function drawBurstEffects(){
+  const b = battle;
+  const t = state.time;
+  let anyBurst = false;
+  for (const e of b.enemies){
+    if (e.dead || e.state !== 'burst') continue;
+    anyBurst = true;
+    ctx.save();
+    for (let i=0;i<3;i++){
+      const p = ((t*1.3 + i/3) % 1);
+      ctx.globalAlpha = (1-p)*0.32;
+      ctx.strokeStyle = RED;
+      ctx.lineWidth = 3.5;
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, 40 + p*380, Math.PI*0.12, Math.PI*0.88);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+  if (anyBurst){
+    ctx.save();
+    ctx.globalAlpha = 0.10 + Math.sin(t*9)*0.03;
+    ctx.fillStyle = RED;
+    ctx.fillRect(0,0,W,H);
+    const pulse = 0.6 + Math.sin(t*12)*0.4;
+    ctx.globalAlpha = 0.25 + pulse*0.25;
+    ctx.strokeStyle = RED;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(PLAYER_X, PLAYER_Y, 46 + pulse*6, 0, Math.PI*2);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawEnemy(e){
+  const t = state.time;
+  const bobY = Math.sin(e.bob)*4;
+  const x = e.x, y = e.y + bobY;
+  const r = e.r;
+
+  let sc = 1;
+  if (e.state === 'telegraph'){
+    const total = e.isBoss ? (e.atkMode === 'burst' ? 1.9 : 0.9) : 0.6;
+    const prog = clamp(1 - e.teleTimer / total, 0, 1);
+    sc = 1 + 0.20 * Math.sin(prog * Math.PI * 0.85);
+  } else if (e.state === 'burst'){
+    sc = 1.12 + Math.sin(t*10)*0.02;
+  }
+  const rr = r * sc;
+
+  ctx.save();
+
+  const aiming = (e.state === 'telegraph') && (!e.isBoss || e.atkMode === 'throw');
+  if (aiming){
+    ctx.save();
+    ctx.globalAlpha = 0.10 + Math.abs(Math.sin(t*14))*0.07;
+    ctx.strokeStyle = RED;
+    ctx.setLineDash([9, 11]);
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(x, y + rr*0.4);
+    ctx.lineTo(PLAYER_X, PLAYER_Y - 20);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  if (e.state === 'telegraph' || e.state === 'burst'){
+    const pulse = 0.5 + Math.sin(t*18)*0.5;
+    ctx.save();
+    ctx.globalAlpha = 0.10 + pulse*0.14;
+    ctx.fillStyle = RED;
+    ctx.beginPath();
+    ctx.arc(x, y, rr + 16 + pulse*10, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  inkBlobPath(x, y, rr, e.seed);
+  ctx.fillStyle = e.flash > 0.3 ? '#555' : (e.isBoss ? '#161616' : '#2b2825');
+  ctx.fill();
+
+  ctx.save();
+  ctx.globalAlpha = 0.25;
+  ctx.strokeStyle = INK; ctx.lineWidth = 1.5;
+  inkBlobPath(x, y, rr+4, e.seed+1);
+  ctx.stroke();
+  ctx.restore();
+
+  ctx.fillStyle = PAPER;
+  const eyeY = y - rr*0.18;
+  if (e.isBoss){
+    ctx.beginPath(); ctx.ellipse(x-rr*0.3, eyeY, rr*0.16, rr*0.10, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(x+rr*0.3, eyeY, rr*0.16, rr*0.10, 0, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = INK; ctx.lineWidth = 5; ctx.lineCap='round';
+    ctx.beginPath();
+    ctx.moveTo(x-rr*0.55, y-rr*0.72); ctx.lineTo(x-rr*0.95, y-rr*1.25);
+    ctx.moveTo(x+rr*0.55, y-rr*0.72); ctx.lineTo(x+rr*0.95, y-rr*1.25);
+    ctx.stroke();
+  } else {
+    ctx.beginPath(); ctx.arc(x-rr*0.28, eyeY, rr*0.11, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(x+rr*0.28, eyeY, rr*0.11, 0, Math.PI*2); ctx.fill();
+  }
+
+  if (e.dotTime > 0){
+    ctx.save();
+    ctx.globalAlpha = 0.5 + Math.sin(t*10)*0.3;
+    ctx.strokeStyle = '#5a7a5a'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(x, y, rr+10, 0, Math.PI*2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  const bw = r*2.1, bh = 7, bx = x-bw/2, by = y - rr - (e.isBoss?52:28);
+  ctx.save();
+  ctx.globalAlpha = 0.22; ctx.fillStyle = INK;
+  ctx.fillRect(bx, by, bw, bh);
+  ctx.globalAlpha = 0.85;
+  ctx.fillStyle = e.isBoss ? RED : INK;
+  ctx.fillRect(bx, by, bw*(e.hp/e.maxHp), bh);
+  ctx.restore();
+
+  if (e.isBoss){
+    drawText('首领', x, by-16, 15, {align:'center', color:RED, weight:'600'});
+    if (e.state === 'telegraph' && e.atkMode === 'burst'){
+      const pulse = 0.6 + Math.sin(t*10)*0.4;
+      ctx.save();
+      ctx.globalAlpha = pulse;
+      drawText('危', x, y - rr - 96, 44, {align:'center', color:RED, weight:'700'});
+      ctx.restore();
+    }
+  }
+
+  if (battle.target === e){
+    ctx.save();
+    ctx.globalAlpha = 0.7 + Math.sin(t*6)*0.2;
+    ctx.strokeStyle = RED; ctx.lineWidth = 2.4;
+    const s = rr + 18;
+    const L = 12;
+    const corners = [[-1,-1],[1,-1],[-1,1],[1,1]];
+    for (const [sx,sy] of corners){
+      ctx.beginPath();
+      ctx.moveTo(x+sx*s, y+sy*s - sy*L);
+      ctx.lineTo(x+sx*s, y+sy*s);
+      ctx.lineTo(x+sx*s - sx*L, y+sy*s);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  ctx.restore();
+}
+
+function drawProjectiles(){
+  const b = battle;
+  for (const p of b.projectiles){
+    ctx.save();
+    for (let i=0;i<p.trail.length;i++){
+      const tp = p.trail[i];
+      const a = (i/p.trail.length)*0.32;
+      ctx.globalAlpha = a;
+      ctx.fillStyle = p.isBoss ? '#5a1a1a' : INK;
+      ctx.beginPath();
+      ctx.arc(tp.x, tp.y, p.size*(0.25 + 0.75*i/p.trail.length), 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 0.92;
+    inkBlobPath(p.x, p.y, p.size, 555);
+    ctx.fillStyle = p.isBoss ? '#4a1414' : '#1c1c1c';
+    ctx.fill();
+    ctx.globalAlpha = 0.35;
+    ctx.fillStyle = PAPER;
+    ctx.beginPath();
+    ctx.arc(p.x - p.size*0.28, p.y - p.size*0.28, p.size*0.22, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawPlayer(){
+  const b = battle;
+  const t = state.time;
+  const px = PLAYER_X, py = PLAYER_Y;
+  const bob = Math.sin(t*3)*3;
+
+  let offX = 0, offY = 0, tilt = 0, swordAng = -64;
+  if (b.playerAnim){
+    const k = b.playerAnim.key;
+    const p = clamp(b.playerAnim.t / b.playerAnim.dur, 0, 1);
+    const s = Math.sin(p*Math.PI);
+    if (k === 'strike'){
+      offY = -s*20;
+      swordAng = lerp(-135, 15, Math.min(1, p*1.7));
+      tilt = s*0.13;
+    } else if (k === 'dodge'){
+      const d = b.playerAnim.dir || 1;
+      offX = s*72*d;
+      swordAng = -18;
+      tilt = -s*0.20*d;
+    } else if (k === 'aoe'){
+      offY = -s*14;
+      swordAng = -64 + p*360;
+      tilt = Math.sin(p*Math.PI*2)*0.14;
+    } else if (k === 'dot'){
+      offY = s*10;
+      swordAng = lerp(-64, 25, s);
+      tilt = s*0.10;
+    } else if (k === 'thunder'){
+      offY = -s*8;
+      swordAng = -90;
+      tilt = -s*0.14;
+    }
+  }
+
+  const cx = px + offX;
+  const cy = py + offY;
+
+  ctx.save();
+
+  if (b.dodgeFx > 0){
+    ctx.globalAlpha = b.dodgeFx*0.3;
+    ctx.fillStyle = '#3a6a8a';
+    for (let i=1;i<=3;i++){
+      inkBlobPath(px - i*22*b.dodgeFx, py + bob, 22, 300+i);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  if (b.dodgeTime > 0){
+    ctx.save();
+    ctx.globalAlpha = 0.35;
+    ctx.strokeStyle = '#3a6a8a'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 40 + Math.sin(t*20)*4, 0, Math.PI*2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  ctx.strokeStyle = INK;
+  ctx.fillStyle = INK;
+  ctx.lineWidth = 4;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  const headX = cx + tilt*50;
+  const headY = cy - 42 + bob;
+  ctx.beginPath();
+  ctx.arc(headX, headY, 15, 0, Math.PI*2);
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.moveTo(headX + tilt*6, cy - 27 + bob);
+  ctx.lineTo(cx, cy + 18 + bob);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(cx, cy + 18 + bob);
+  ctx.lineTo(cx - 14, cy + 44 + bob);
+  ctx.moveTo(cx, cy + 18 + bob);
+  ctx.lineTo(cx + 14, cy + 44 + bob);
+  ctx.stroke();
+
+  const handX = cx + 26, handY = cy - 4 + bob;
+  ctx.beginPath();
+  ctx.moveTo(headX + tilt*4, cy - 16 + bob);
+  ctx.lineTo(handX, handY);
+  ctx.stroke();
+
+  const rad = swordAng * Math.PI / 180;
+  const tipX = handX + Math.cos(rad)*66;
+  const tipY = handY + Math.sin(rad)*66;
+  ctx.strokeStyle = '#2b2825';
+  ctx.lineWidth = 3.5;
+  ctx.beginPath();
+  ctx.moveTo(handX, handY);
+  ctx.lineTo(tipX, tipY);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(tipX, tipY, 2.2, 0, Math.PI*2);
+  ctx.fillStyle = '#2b2825';
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function drawGesturePath(pts){
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  const n = pts.length;
+  for (let i=1;i<n;i++){
+    const t = i/n;
+    ctx.beginPath();
+    ctx.moveTo(pts[i-1].x, pts[i-1].y);
+    ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.strokeStyle = `rgba(28,28,28,${0.15 + 0.65*t})`;
+    ctx.lineWidth = 2 + 7*t;
+    ctx.stroke();
+  }
+  const last = pts[n-1];
+  ctx.beginPath();
+  ctx.arc(last.x, last.y, 5, 0, Math.PI*2);
+  ctx.fillStyle = 'rgba(28,28,28,0.7)';
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawEffects(){
+  for (const ef of effects){
+    const p = ef.t / ef.dur;
+    ctx.save();
+    if (ef.type === 'slash'){
+      ctx.globalAlpha = 1-p;
+      ctx.strokeStyle = INK;
+      ctx.lineWidth = 6*(1-p);
+      ctx.beginPath();
+      const L = 90;
+      ctx.moveTo(ef.x - L/2, ef.y - L);
+      ctx.lineTo(ef.x + L/2, ef.y + L);
+      ctx.stroke();
+    }
+    else if (ef.type === 'ring'){
+      ctx.globalAlpha = (1-p)*0.6;
+      ctx.strokeStyle = INK;
+      ctx.lineWidth = 3*(1-p)+1;
+      ctx.beginPath();
+      ctx.arc(ef.x, ef.y, lerp(ef.r0, ef.r1, p), 0, Math.PI*2);
+      ctx.stroke();
+    }
+    else if (ef.type === 'dissolve'){
+      ctx.globalAlpha = (1-p)*0.8;
+      const rnd = mulberry32(ef.x*7+ef.y);
+      for (let i=0;i<10;i++){
+        const a = rnd()*Math.PI*2;
+        const rr = ef.r*(0.5+rnd()*0.8);
+        const dx = Math.cos(a)*rr*(1+p*2);
+        const dy = Math.sin(a)*rr*(1+p*2) - p*40;
+        ctx.beginPath();
+        ctx.arc(ef.x+dx, ef.y+dy, (1-p)*(3+rnd()*5), 0, Math.PI*2);
+        ctx.fillStyle = INK;
+        ctx.fill();
+      }
+    }
+    else if (ef.type === 'bolt'){
+      ctx.globalAlpha = 1-p;
+      ctx.strokeStyle = INK;
+      ctx.lineWidth = 4*(1-p)+1;
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      let cx = ef.x + (Math.random()-0.5)*30;
+      let cy = 60;
+      ctx.moveTo(cx, cy);
+      while (cy < ef.y - 20){
+        cy += 40 + Math.random()*40;
+        cx += (Math.random()-0.5)*46;
+        ctx.lineTo(cx, cy);
+      }
+      ctx.lineTo(ef.x, ef.y);
+      ctx.stroke();
+    }
+    else if (ef.type === 'seal'){
+      ctx.globalAlpha = (1-p)*0.8;
+      ctx.strokeStyle = '#5a7a5a';
+      ctx.lineWidth = 2;
+      const r = 30 + p*30;
+      ctx.beginPath();
+      ctx.moveTo(ef.x, ef.y-r);
+      ctx.lineTo(ef.x+r*0.87, ef.y+r*0.5);
+      ctx.lineTo(ef.x-r*0.87, ef.y+r*0.5);
+      ctx.closePath();
+      ctx.stroke();
+    }
+    else if (ef.type === 'afterimage'){
+      ctx.globalAlpha = (1-p)*0.4;
+      ctx.strokeStyle = '#3a6a8a';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(ef.x, ef.y, 36+p*30, 0, Math.PI*2);
+      ctx.stroke();
+    }
+    else if (ef.type === 'impact'){
+      ctx.globalAlpha = (1-p)*0.9;
+      ctx.fillStyle = RED;
+      for (let i=0;i<7;i++){
+        const a = i/7*Math.PI*2 + 0.3;
+        const r = 6 + p*38;
+        ctx.beginPath();
+        ctx.arc(ef.x + Math.cos(a)*r, ef.y + Math.sin(a)*r, (1-p)*4+1, 0, Math.PI*2);
+        ctx.fill();
+      }
+    }
+    else if (ef.type === 'dodgeSpark'){
+      ctx.globalAlpha = (1-p)*0.8;
+      ctx.fillStyle = '#3a6a8a';
+      for (let i=0;i<6;i++){
+        const a = i/6*Math.PI*2;
+        const r = 10 + p*44;
+        ctx.beginPath();
+        ctx.arc(ef.x + Math.cos(a)*r, ef.y + Math.sin(a)*r, 3*(1-p)+1, 0, Math.PI*2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+}
+
+/* ---------- 战斗退出确认弹窗 ---------- */
+function drawBattleExitConfirm(){
+  ctx.save();
+  ctx.globalAlpha = 0.45;
+  ctx.fillStyle = INK;
+  ctx.fillRect(0,0,W,H);
+  ctx.restore();
+
+  const px = 56, pw = W-112, py = H*0.38, ph = 220;
+  ctx.save();
+  ctx.fillStyle = PAPER;
+  roundRectPath(px, py, pw, ph, 14);
+  ctx.fill();
+  ctx.restore();
+  sketchRect(px, py, pw, ph, 2, 920);
+
+  drawText('确认离开战斗？', W/2, py+50, 24, {align:'center', weight:'700'});
+  drawText('离开后本次战斗进度将会丢失。', W/2, py+88, 14, {align:'center', alpha:0.55});
+
+  const by = py+ph-66;
+  ctx.save();
+  ctx.globalAlpha = 0.75;
+  sketchRect(px+24, by, 110, 50, 1.5, 921);
+  drawText('继续战斗', px+79, by+25, 17, {align:'center'});
+  ctx.restore();
+  addBtn(px+24, by, 110, 50, '', ()=>{ if (battle) battle.confirmExit = false; });
+
+  ctx.save();
+  ctx.globalAlpha = 0.9;
+  sketchRect(px+pw-134, by, 110, 50, 1.8, 922);
+  drawText('确认离开', px+pw-79, by+25, 17, {align:'center', color:RED});
+  ctx.restore();
+  addBtn(px+pw-134, by, 110, 50, '', ()=>{
+    if (!battle) return;
+    if (battle.endless) updateEndlessBest(battle.waveIdx + 1);
+    battle = null;
+    state.scene = 'levels';
+  });
+}
+
+function drawBattleUI(){
+  const b = battle;
+
+  if (b.confirmExit){
+    drawBattleExitConfirm();
+    return;
+  }
+
+  ctx.save();
+  ctx.globalAlpha = 0.85;
+  const hx = 30, hy = 34, hw = W-60, hh = 18;
+  ctx.fillStyle = 'rgba(28,28,28,0.15)';
+  roundRectPath(hx,hy,hw,hh,9);
+  ctx.fill();
+  ctx.fillStyle = b.hp/b.maxHp > 0.3 ? INK : RED;
+  roundRectPath(hx,hy, Math.max(0, hw*(b.hp/b.maxHp)), hh, 9);
+  ctx.fill();
+  ctx.restore();
+  drawText(`${Math.max(0,Math.round(b.hp))} / ${b.maxHp}`, W/2, hy+hh/2, 13, {align:'center', color:PAPER, alpha:0.95});
+
+  drawText(b.lv.name, 30, 76, 16, {alpha:0.65});
+  if (b.endless){
+    drawText(`第 ${b.waveIdx+1} 波`, W-30, 76, 16, {align:'right', alpha:0.65});
+    if (b.reviveCount > 0){
+      drawText(`援助 ×${b.reviveCount}`, W-30, 98, 13, {align:'right', color:RED, alpha:0.6});
+    }
+  } else {
+    drawText(`第 ${Math.min(b.waveIdx+1, b.waves.length)} / ${b.waves.length} 波`, W-30, 76, 16, {align:'right', alpha:0.65});
+  }
+
+  const unlockedKeys = SKILL_ORDER.filter(k=>state.skills[k].unlocked);
+  const totalW = unlockedKeys.length*88;
+  let sx = W/2 - totalW/2;
+  const sy = H-58;
+  for (const k of unlockedKeys){
+    const s = state.skills[k];
+    const ready = s.cd <= 0;
+    ctx.save();
+    ctx.globalAlpha = ready ? 0.75 : 0.28;
+    drawShapeGlyph(k, sx+18, sy, 13, true);
+    ctx.restore();
+    drawText(s.name, sx+36, sy, 13, {alpha: ready?0.6:0.25});
+    if (!ready){
+      ctx.save();
+      ctx.globalAlpha = 0.3;
+      ctx.strokeStyle = INK; ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(sx+18, sy, 15, -Math.PI/2, -Math.PI/2 + Math.PI*2*(s.cd/s.cdMax));
+      ctx.stroke();
+      ctx.restore();
+    }
+    sx += 88;
+  }
+
+  if (b.hintTimer > 0 && b.hint){
+    ctx.save();
+    ctx.globalAlpha = clamp(b.hintTimer, 0, 1)*0.9;
+    drawText(b.hint, W/2, 130, 17, {align:'center', color:RED});
+    ctx.restore();
+  }
+
+  const hideExit = ((b.phase === 'defeat' && b.phaseTimer < 1.5) || b.phase === 'victory');
+  if (!hideExit){
+    ctx.save();
+    ctx.globalAlpha = 0.4;
+    drawText('×', W-36, 34, 30, {align:'center'});
+    ctx.restore();
+    addBtn(W-60, 8, 52, 52, '×', ()=>{
+      if (!battle) return;
+      battle.confirmExit = true;
+      battle.drawing = false;
+      battle.path = [];
+    });
+  }
+
+  if (b.phase === 'victory'){
+    drawOverlayResult(true);
+  } else if (b.phase === 'defeat'){
+    drawOverlayResult(false);
+  }
+}
+
+function drawOverlayResult(win){
+  const b = battle;
+  const a = clamp(b.phaseTimer/0.6, 0, 1);
+  ctx.save();
+  ctx.globalAlpha = a*0.75;
+  ctx.fillStyle = PAPER;
+  ctx.fillRect(0,0,W,H);
+  ctx.restore();
+
+  drawText(win ? '清 剿 完 成' : '力 竭', W/2, H*0.32, 40, {align:'center', weight:'700', color: win?INK:RED, alpha:a});
+
+  if (win){
+    drawText(`获得积分 +${b.reward}`, W/2, H*0.41, 20, {align:'center', alpha:a});
+    drawText(`获得经验 +${b.expGain}`, W/2, H*0.45, 20, {align:'center', alpha:a});
+
+    const appear = clamp((b.phaseTimer - 1.5)/0.6, 0, 1);
+    const by = H*0.56;
+    const by2 = by + 80;
+
+    if (appear > 0){
+      ctx.save();
+      ctx.globalAlpha = a*appear;
+      sketchRect(W/2-100, by, 200, 62, 1.8, 77);
+      drawText('返 回', W/2, by+31, 22, {align:'center', alpha:appear});
+      sketchRect(W/2-100, by2, 200, 54, 1.4, 78);
+      drawText('再 战 一 次', W/2, by2+27, 18, {align:'center', alpha:appear*0.75});
+      ctx.restore();
+    }
+    if (appear >= 1){
+      addBtn(W/2-100, by, 200, 62, '', ()=>{ battle=null; state.scene='levels'; });
+      addBtn(W/2-100, by2, 200, 54, '', ()=>{ const idx=b.levelIdx; startBattle(idx); });
+    }
+    return;
+  }
+
+  if (b.endless){
+    drawText(`止步于第 ${b.waveIdx + 1} 波`, W/2, H*0.41, 22, {align:'center', alpha:a});
+    if (state.endlessBest > 0){
+      drawText(`最高记录 · 第 ${state.endlessBest} 波`, W/2, H*0.45, 14, {align:'center', alpha:a*0.5});
+    }
+
+    const cost = endlessReviveCost(b.reviveCount);
+    const can = state.player.credits >= cost;
+    const appear = clamp((b.phaseTimer - 1.5)/0.6, 0, 1);
+
+    if (appear > 0){
+      const rx = W/2-150, ry = H*0.52, rw = 300, rh = 88;
+      ctx.save();
+      ctx.globalAlpha = a * appear;
+      sketchRect(rx, ry, rw, rh, 1.8, 81);
+      drawText('向 学 院 请 求 医 疗 援 助', W/2, ry+28, 19, {align:'center', alpha: can?1:0.35, weight:'600'});
+      drawText('医疗队将把你从濒死状态拉回战场，恢复六成气血。', W/2, ry+52, 12, {align:'center', alpha: can?0.55:0.3});
+      drawText(`消耗 ${cost} 积分`, W/2, ry+72, 13, {align:'center', alpha: can?0.7:0.3});
+      ctx.restore();
+      if (appear >= 1 && can){
+        addBtn(rx, ry, rw, rh, '', ()=>reviveEndless());
+      }
+    }
+
+    const bx = W/2-100, by2 = H*0.70;
+    if (appear > 0){
+      ctx.save();
+      ctx.globalAlpha = a * appear * 0.85;
+      sketchRect(bx, by2, 200, 56, 1.4, 82);
+      drawText('撤 离 回 廊', W/2, by2+28, 18, {align:'center', alpha:appear*0.7});
+      ctx.restore();
+    }
+    if (appear >= 1){
+      addBtn(bx, by2, 200, 56, '', ()=>{ battle=null; state.scene='levels'; });
+    }
+  } else {
+    drawText('魔气侵蚀过深……', W/2, H*0.44, 18, {align:'center', alpha:a*0.55});
+    const by = H*0.58;
+    const appear = clamp((b.phaseTimer - 1.5) / 0.6, 0, 1);
+    if (appear > 0){
+      ctx.save();
+      ctx.globalAlpha = a * appear * 0.95;
+      sketchRect(W/2-100, by, 200, 62, 1.8, 77);
+      drawText('撤 离', W/2, by+31, 22, {align:'center', alpha: appear});
+      ctx.restore();
+    }
+    if (appear >= 1){
+      addBtn(W/2-100, by, 200, 62, '', ()=>{ battle=null; state.scene='levels'; });
+    }
+  }
+}
+
+/* ============================================================
+   指针事件分发
+   ============================================================ */
+function onPointerDown(p){
+  for (const b of btnList){
+    if (p.x >= b.x && p.x <= b.x+b.w && p.y >= b.y && p.y <= b.y+b.h){
+      pendingBtn = b;
+      return;
+    }
+  }
+  pendingBtn = null;
+
+  if (state.scene === 'battle' && battle && battle.phase === 'fight' && !introDialogue && !battle.confirmExit){
+    for (const e of battle.enemies){
+      if (e.dead) continue;
+      if (dist2(p.x, p.y, e.x, e.y) < e.r + 26){
+        battle.target = e;
+        break;
+      }
+    }
+  }
+}
+
+function onPointerUp(p, path, moved){
+  if (pendingBtn && moved < 10){
+    const b = pendingBtn;
+    pendingBtn = null;
+    AudioSys.click();
+    b.fn();
+    return;
+  }
+  pendingBtn = null;
+
+  if (introDialogue) return;
+  if (state.scene === 'battle' && battle && battle.phase === 'fight' && !battle.confirmExit){
+    if (moved < 18){
+      battle.drawing = false;
+      battle.path = [];
+      return;
+    }
+    const shape = classifyPath(path);
+    if (shape){
+      const key = SHAPE_TO_SKILL[shape];
+      if (key){
+        let dir = 1;
+        if (key === 'dodge' && path.length > 1){
+          dir = (path[path.length-1].x - path[0].x) >= 0 ? 1 : -1;
+        }
+        castSkill(key, dir);
+      }
+    }
+    battle.drawing = false;
+    battle.path = [];
+    return;
+  }
+}
+
+/* ============================================================
+   主循环
+   ============================================================ */
+let lastT = 0;
+let lastScene = null;
+function loop(ts){
+  if (!lastT) lastT = ts;
+  let dt = (ts - lastT)/1000;
+  lastT = ts;
+  dt = Math.min(dt, 0.05);
+  state.time += dt;
+
+  AudioSys.update(state.scene);
+
+  if (state.scene === 'loading') updateLoading(dt);
+  else if (state.scene === 'battle' && !introDialogue) updateBattle(dt);
+
+  if (state.scene === 'skills' && !scroll.dragging && !introDialogue){
+    const frame = dt * 60;
+    if (Math.abs(scroll.vel) > 0.15){
+      scroll.offset = clamp(scroll.offset + scroll.vel * frame, 0, scroll.max);
+      scroll.vel *= Math.pow(0.92, frame);
+    } else {
+      scroll.vel = 0;
+    }
+  }
+
+  if (state.scene !== lastScene){
+    lastScene = state.scene;
+    if (state.scene === 'skills'){ scroll.offset = 0; scroll.vel = 0; }
+    if (INTRO_DIALOGUES[state.scene] && !introDialogueSeen[state.scene]){
+      introDialogue = INTRO_DIALOGUES[state.scene];
+      introLineIdx = 0;
+      introDialogueSeen[state.scene] = true;
+    }
+  }
+
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle = PAPER;
+  ctx.fillRect(0,0,W,H);
+
+  if (state.scene === 'loading'){
+    ctx.drawImage(paperTex,0,0);
+    btnList = [];
+    drawLoading();
+  }
+  else if (state.scene === 'menu'){
+    ctx.drawImage(paperTex,0,0);
+    btnList = [];
+    drawMenu();
+  }
+  else if (state.scene === 'levels'){
+    btnList = [];
+    drawLevels();
+  }
+  else if (state.scene === 'skills'){
+    btnList = [];
+    drawSkills();
+  }
+  else if (state.scene === 'stats'){
+    btnList = [];
+    drawStats();
+  }
+  else if (state.scene === 'settings'){
+    btnList = [];
+    drawSettings();
+  }
+  else if (state.scene === 'battle'){
+    btnList = [];
+    drawBattle();
+  }
+
+  if (introDialogue){
+    btnList = [];
+    drawIntroDialogue();
+  }
+
+  requestAnimationFrame(loop);
+}
+
+/* ============================================================
+   启动
+   ============================================================ */
+resize();
+paperTex = makePaper();
+requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
