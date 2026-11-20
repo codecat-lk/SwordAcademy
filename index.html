@@ -315,11 +315,6 @@ const state = {
 };
 const SKILL_ORDER = ['dodge','strike','aoe','dot','thunder'];
 
-try {
-  const v = parseInt(localStorage.getItem('fxdx_endless_best')||'0', 10);
-  if (!isNaN(v)) state.endlessBest = v;
-} catch(e){}
-
 const LEVELS = [
   { name:'校区外围',   sub:'低阶魔物 · 零星',   waves:[2,2,3],       boss:false },
   { name:'教学楼废墟', sub:'中阶魔物 · 聚集',   waves:[3,3,4],       boss:false },
@@ -336,9 +331,84 @@ function playerAtk(){ return state.player.atk; }
 function updateEndlessBest(wave){
   if (wave > state.endlessBest){
     state.endlessBest = wave;
-    try { localStorage.setItem('fxdx_endless_best', String(wave)); } catch(e){}
+    saveGame();
   }
 }
+
+/* ============================================================
+   存档系统
+   ============================================================ */
+const SAVE_KEY = 'fxdx_save_v1';
+
+function saveGame(){
+  try {
+    const data = {
+      v: 1,
+      player: {
+        level: state.player.level,
+        exp: state.player.exp,
+        credits: state.player.credits
+      },
+      cleared: state.cleared.slice(),
+      endlessBest: state.endlessBest,
+      introSeen: Object.assign({}, introDialogueSeen),
+      skills: {}
+    };
+    for (const k in state.skills){
+      data.skills[k] = {
+        unlocked: state.skills[k].unlocked,
+        prof: state.skills[k].prof
+      };
+    }
+    localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+  } catch(e){}
+}
+
+function loadGame(){
+  try {
+    const raw = localStorage.getItem(SAVE_KEY);
+    if (!raw){
+      // 兼容旧版无尽最高波次
+      const old = parseInt(localStorage.getItem('fxdx_endless_best')||'0', 10);
+      if (!isNaN(old) && old > 0) state.endlessBest = old;
+      return;
+    }
+    const data = JSON.parse(raw);
+    if (!data || data.v !== 1) return;
+
+    if (data.player){
+      state.player.level = Math.max(1, Math.floor(data.player.level) || 1);
+      state.player.exp = Math.max(0, Math.floor(data.player.exp) || 0);
+      state.player.credits = Math.max(0, Math.floor(data.player.credits) || 0);
+    }
+    if (Array.isArray(data.cleared)){
+      for (let i=0;i<state.cleared.length;i++){
+        state.cleared[i] = !!data.cleared[i];
+      }
+    }
+    if (typeof data.endlessBest === 'number' && !isNaN(data.endlessBest)){
+      state.endlessBest = data.endlessBest;
+    } else {
+      const old = parseInt(localStorage.getItem('fxdx_endless_best')||'0', 10);
+      if (!isNaN(old) && old > 0) state.endlessBest = old;
+    }
+    if (data.introSeen && typeof data.introSeen === 'object'){
+      for (const k in introDialogueSeen){
+        if (data.introSeen[k]) introDialogueSeen[k] = true;
+      }
+    }
+    if (data.skills && typeof data.skills === 'object'){
+      for (const k in state.skills){
+        const s = data.skills[k];
+        if (!s) continue;
+        if (typeof s.unlocked === 'boolean') state.skills[k].unlocked = s.unlocked;
+        if (typeof s.prof === 'number') state.skills[k].prof = clamp(s.prof, 0, 100);
+      }
+    }
+  } catch(e){}
+}
+
+window.addEventListener('beforeunload', saveGame);
 
 /* ============================================================
    对话式引导
@@ -812,6 +882,7 @@ function drawSkillCard(key, x, y, w, h, textW, screenTop, screenBottom){
         addBtn(bbx, screenY, 78, 34, '解锁', ()=>{
           state.player.credits -= s.cost;
           s.unlocked = true;
+          saveGame();
         });
       }
     }
@@ -1028,7 +1099,7 @@ function drawSettings(){
   drawText('返回主页', W/2, ey+31, 22, {align:'center'});
   addBtn(ex, ey, 200, 62, '返回主页', ()=>{ state.scene='menu'; });
 
-  drawText('复兴大学 · 剑法学院  v1.2', W/2, H-70, 13, {align:'center', alpha:0.35});
+  drawText('复兴大学 · 剑法学院  v1.3', W/2, H-70, 13, {align:'center', alpha:0.35});
 }
 
 /* ============================================================
@@ -1152,6 +1223,8 @@ function drawIntroDialogue(){
     if (introLineIdx >= d.lines.length){
       introDialogue = null;
       introLineIdx = 0;
+      introDialogueSeen[state.scene] = true;
+      saveGame();
     }
   });
 }
@@ -1272,6 +1345,7 @@ function nextWave(){
       b.phase = 'victory';
       b.phaseTimer = 0;
       state.cleared[b.levelIdx] = true;
+      saveGame();
       return;
     }
   } else {
@@ -1526,6 +1600,7 @@ function damageEnemy(e, dmg, type){
     addFloater(`+${credits}`, e.x, e.y-56, '#6a5a2a');
     effects.push({ type:'dissolve', x:e.x, y:e.y, r:e.r, t:0, dur:0.7 });
     checkLevelUp();
+    saveGame();
   }
 }
 
@@ -1568,6 +1643,7 @@ function reviveEndless(){
   effects.push({type:'ring', x:PLAYER_X, y:PLAYER_Y, t:0, dur:0.7, r0:10, r1:200});
   addFloater('医疗队抵达', PLAYER_X, PLAYER_Y-90, RED);
   AudioSys.heal();
+  saveGame();
 }
 
 /* ---------- 出招 ---------- */
@@ -2591,6 +2667,7 @@ function loop(ts){
    ============================================================ */
 resize();
 paperTex = makePaper();
+loadGame();
 requestAnimationFrame(loop);
 
 })();
